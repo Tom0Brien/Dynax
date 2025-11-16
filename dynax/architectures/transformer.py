@@ -60,18 +60,28 @@ class CausalSelfAttention(nn.Module):
 
         # Compute Q, K, V (GPT-2 style: single linear projection)
         qkv = nn.Dense(
-            self.embed_dim * 3, use_bias=self.use_bias, name="c_attn"
+            self.embed_dim * 3,
+            use_bias=self.use_bias,
+            kernel_init=nn.initializers.normal(stddev=0.02),
+            name="c_attn",
         )(x)
         qkv = qkv.reshape(seq_len, 3, self.num_heads, head_dim)
         q, k, v = qkv[:, 0], qkv[:, 1], qkv[:, 2]
+        # q, k, v: (seq_len, num_heads, head_dim)
 
-        # Scaled dot-product attention
+        # Scaled dot-product attention per head
         scale = 1.0 / jnp.sqrt(head_dim)
-        attn_weights = jnp.einsum("thd,shd->ts", q, k) * scale
+        # Compute attention scores per head: (num_heads, seq_len, seq_len)
+        attn_weights = jnp.einsum("thd,shd->hts", q, k) * scale
 
         # Causal mask: only attend to past and current timesteps
-        mask = jnp.triu(jnp.ones((seq_len, seq_len)), k=1)
-        attn_weights = jnp.where(mask, -jnp.inf, attn_weights)
+        # Boolean mask: (seq_len, seq_len)
+        mask = jnp.triu(jnp.ones((seq_len, seq_len), dtype=bool), k=1)
+        # Broadcast mask over heads: (1, seq_len, seq_len)
+        attn_weights = jnp.where(
+            mask[None, :, :], -1e9, attn_weights
+        )  # Use -1e9 instead of -inf for dtype safety
+        # (num_heads, seq_len, seq_len)
         attn_weights = nn.softmax(attn_weights, axis=-1)
 
         # Apply dropout
@@ -80,13 +90,17 @@ class CausalSelfAttention(nn.Module):
                 attn_weights, deterministic=not training
             )
 
-        # Apply attention to values
-        out = jnp.einsum("ts,shd->thd", attn_weights, v)
+        # Apply attention to values per head: (num_heads, seq_len, head_dim)
+        out = jnp.einsum("hts,shd->thd", attn_weights, v)
+        # Reshape to (seq_len, embed_dim)
         out = out.reshape(seq_len, self.embed_dim)
 
         # Output projection (GPT-2 style: c_proj)
         out = nn.Dense(
-            self.embed_dim, use_bias=self.use_bias, name="c_proj"
+            self.embed_dim,
+            use_bias=self.use_bias,
+            kernel_init=nn.initializers.normal(stddev=0.02),
+            name="c_proj",
         )(out)
         out = nn.Dropout(self.dropout, deterministic=not training)(out)
 
@@ -121,7 +135,12 @@ class MLP(nn.Module):
         Returns:
             Output, shape (seq_len, embed_dim).
         """
-        x = nn.Dense(self.ff_dim, use_bias=self.use_bias, name="c_fc")(x)
+        x = nn.Dense(
+            self.ff_dim,
+            use_bias=self.use_bias,
+            kernel_init=nn.initializers.normal(stddev=0.02),
+            name="c_fc",
+        )(x)
         if self.activation == "gelu":
             x = nn.gelu(x)
         elif self.activation == "relu":
@@ -130,7 +149,12 @@ class MLP(nn.Module):
             x = nn.swish(x)
         else:
             raise ValueError(f"Unknown activation: {self.activation}")
-        x = nn.Dense(self.embed_dim, use_bias=self.use_bias, name="c_proj")(x)
+        x = nn.Dense(
+            self.embed_dim,
+            use_bias=self.use_bias,
+            kernel_init=nn.initializers.normal(stddev=0.02),
+            name="c_proj",
+        )(x)
         x = nn.Dropout(self.dropout, deterministic=not training)(x)
         return x
 
@@ -224,7 +248,7 @@ class TransformerDynamicsModel(BaseDynamicsModel):
     embed_dim: int = 256
     num_heads: int = 8
     num_layers: int = 6
-    ff_dim: int = None  # Will default to 4 * embed_dim
+    ff_dim: int = None  # Will default to 4 * embed_dim (Optional[int])
     block_size: int = 32
     dropout: float = 0.0
     use_bias: bool = False
