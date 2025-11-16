@@ -6,7 +6,7 @@ import jax
 import jax.numpy as jnp
 from flax import linen as nn
 
-from dynax.models.base import BaseDynamicsModel, DynamicsModelParams
+from dynax.base import BaseDynamicsModel, DynamicsModelParams
 from dynax.utils.normalization import (
     denormalize_output,
     normalize_action,

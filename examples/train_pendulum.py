@@ -15,8 +15,8 @@ import jax.numpy as jnp
 import mujoco
 from mujoco import mjx
 
+from dynax import TrainingConfig, train_dynamics_model
 from dynax.architectures import MLPDynamicsModel
-from dynax.models import TrainingConfig, train_dynamics_model
 from dynax.utils import (
     collect_random_rollouts,
     create_dataset,
