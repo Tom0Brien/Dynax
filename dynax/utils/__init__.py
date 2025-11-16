@@ -6,6 +6,8 @@ from dynax.utils.data import (
     collect_random_rollouts,
     create_dataset,
     extract_state_features,
+    load_dataset,
+    save_dataset,
     split_dataset,
 )
 from dynax.utils.normalization import (
@@ -22,6 +24,8 @@ __all__ = [
     "collect_random_rollouts",
     "create_dataset",
     "extract_state_features",
+    "load_dataset",
+    "save_dataset",
     "split_dataset",
     "compute_action_normalization_stats",
     "compute_normalization_stats",

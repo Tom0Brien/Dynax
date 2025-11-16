@@ -1,9 +1,12 @@
 """Data collection and dataset utilities."""
 
+import pickle
+from pathlib import Path
 from typing import Callable, Optional, Tuple
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from flax.struct import dataclass
 from mujoco import mjx
 
@@ -231,6 +234,67 @@ def split_dataset(
     return train_dataset, val_dataset
 
 
+def save_dataset(dataset: DynamicsDataset, path: str | Path) -> None:
+    """Save a DynamicsDataset to disk.
+
+    Args:
+        dataset: Dataset to save.
+        path: Path to save the dataset (will use .pkl extension if not provided).
+    """
+    path = Path(path)
+    if not path.suffix:
+        path = path.with_suffix(".pkl")
+
+    # Convert JAX arrays to numpy for serialization
+    data_dict = {
+        "states": np.array(dataset.states),
+        "actions": np.array(dataset.actions),
+        "next_states": np.array(dataset.next_states),
+        "accelerations": np.array(dataset.accelerations),
+        "state_dim": dataset.state_dim,
+        "action_dim": dataset.action_dim,
+        "nq": dataset.nq,
+        "nv": dataset.nv,
+        "dt": dataset.dt,
+    }
+
+    # Create parent directory if it doesn't exist
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    with open(path, "wb") as f:
+        pickle.dump(data_dict, f)
+
+
+def load_dataset(path: str | Path) -> DynamicsDataset:
+    """Load a DynamicsDataset from disk.
+
+    Args:
+        path: Path to the saved dataset.
+
+    Returns:
+        Loaded DynamicsDataset.
+    """
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(f"Dataset not found: {path}")
+
+    with open(path, "rb") as f:
+        data_dict = pickle.load(f)
+
+    # Convert numpy arrays back to JAX arrays
+    return DynamicsDataset(
+        states=jnp.array(data_dict["states"]),
+        actions=jnp.array(data_dict["actions"]),
+        next_states=jnp.array(data_dict["next_states"]),
+        accelerations=jnp.array(data_dict["accelerations"]),
+        state_dim=data_dict["state_dim"],
+        action_dim=data_dict["action_dim"],
+        nq=data_dict["nq"],
+        nv=data_dict["nv"],
+        dt=data_dict["dt"],
+    )
+
+
 def collect_and_prepare_data(
     env,
     num_rollouts: int = 50,
@@ -239,8 +303,12 @@ def collect_and_prepare_data(
     action_max: Optional[jax.Array] = None,
     train_ratio: float = 0.8,
     rng: Optional[jax.Array] = None,
+    dataset_path: Optional[str | Path] = None,
+    force_recollect: bool = False,
 ) -> Tuple[DynamicsDataset, DynamicsDataset]:
     """Collect rollouts and prepare train/val datasets.
+
+    Optionally saves/loads datasets from disk to avoid re-collection.
 
     Args:
         env: Environment instance (provides model, action bounds, reset).
@@ -250,10 +318,34 @@ def collect_and_prepare_data(
         action_max: Maximum action values (defaults to env.action_max).
         train_ratio: Fraction of data for training.
         rng: Random number generator key.
+        dataset_path: Optional path to save/load dataset. If provided and file exists,
+            loads from disk instead of collecting. Use .pkl extension or omit.
+        force_recollect: If True, recollect data even if dataset_path exists.
 
     Returns:
         Tuple of (train_dataset, val_dataset).
     """
+    # Try to load from disk if path provided and exists
+    if dataset_path is not None and not force_recollect:
+        dataset_path = Path(dataset_path)
+        if not dataset_path.suffix:
+            dataset_path = dataset_path.with_suffix(".pkl")
+
+        if dataset_path.exists():
+            print(f"Loading dataset from {dataset_path}...")
+            full_dataset = load_dataset(dataset_path)
+
+            # Split into train/val
+            if rng is None:
+                rng = jax.random.PRNGKey(0)
+            rng, split_rng = jax.random.split(rng)
+            train_dataset, val_dataset = split_dataset(
+                full_dataset, train_ratio=train_ratio, rng=split_rng
+            )
+            print(f"Loaded dataset: {len(full_dataset)} samples")
+            return train_dataset, val_dataset
+
+    # Collect new data
     if rng is None:
         rng = jax.random.PRNGKey(0)
 
@@ -269,6 +361,7 @@ def collect_and_prepare_data(
         data = env.reset(data, r)
         return mjx.forward(m, data)
 
+    print(f"Collecting {num_rollouts} rollouts of length {rollout_length}...")
     states, actions, next_states, accelerations = collect_random_rollouts(
         model=model,
         num_rollouts=num_rollouts,
@@ -287,6 +380,14 @@ def collect_and_prepare_data(
         accelerations=accelerations,
         dt=env.dt,
     )
+
+    # Save to disk if path provided
+    if dataset_path is not None:
+        dataset_path = Path(dataset_path)
+        if not dataset_path.suffix:
+            dataset_path = dataset_path.with_suffix(".pkl")
+        print(f"Saving dataset to {dataset_path}...")
+        save_dataset(dataset, dataset_path)
 
     rng, split_rng = jax.random.split(rng)
     train_dataset, val_dataset = split_dataset(

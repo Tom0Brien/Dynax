@@ -15,9 +15,10 @@ train_dataset, val_dataset = collect_and_prepare_data(
     num_rollouts=50,
     rollout_length=100,
     rng=rng,
+    dataset_path="data/pendulum_dataset.pkl",  # Save/load dataset
 )
 
-# Train model (using paper architecture)
+# Train model
 dynamics_model = MLPDynamicsModel(
     state_dim=train_dataset.state_dim,
     action_dim=train_dataset.action_dim,
@@ -31,7 +32,7 @@ trained_params = train_dynamics_model(
     train_dataset=train_dataset,
     val_dataset=val_dataset,
     config=TrainingConfig(
-        num_epochs=100,
+        num_epochs=200,
         batch_size=512,
         learning_rate=1e-3,
         noise_std=0.01,
