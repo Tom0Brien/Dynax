@@ -53,7 +53,7 @@ python examples/train_pendulum.py
 python examples/train_cart_pole.py
 ```
 
-## Architecture
+## Model Formulation
 
 Dynax models predict **state deltas** and use residual dynamics:
 
@@ -64,6 +64,12 @@ $$
 where $f_\theta$ is the learned dynamics model predicting $\Delta s_t = s_{t+1} - s_t$.
 
 All inputs/outputs are automatically normalized during training.
+
+## Architectures
+
+- **MLPDynamicsModel**: Simple feedforward MLP with configurable hidden layers
+- **ResNetDynamicsModel**: Residual network architecture with skip connections
+- **TransformerDynamicsModel**: GPT-2 style transformer with causal self-attention
 
 ## Custom Models
 
@@ -79,6 +85,12 @@ class MyModel(BaseDynamicsModel):
         x = nn.relu(x)
         return nn.Dense(self.state_dim)(x)
 ```
+
+## TODO
+
+- [ ] Improve performance
+- [ ] Support contact information in input
+- [ ] Support robot centric state representation
 
 ## License
 
