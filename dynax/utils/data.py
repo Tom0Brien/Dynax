@@ -262,6 +262,67 @@ def create_dataset(
     )
 
 
+def create_history_windows(
+    dataset: DynamicsDataset, history_length: int = 1
+) -> DynamicsDataset:
+    """Create overlapping history windows from a dataset.
+
+    Args:
+        dataset: Original dataset with single-step transitions.
+        history_length: Number of timesteps in each history window.
+
+    Returns:
+        New dataset where states/actions are history windows.
+        The `states` field contains windows of shape
+        (N', history_length, state_dim) and `actions` contains windows of
+        shape (N', history_length, action_dim). Targets remain shape
+        (N', state_dim) for the next state after the window.
+    """
+    if history_length == 1:
+        # No windowing needed, just add dimension for consistency
+        return dataset.replace(
+            states=dataset.states[:, None, :],
+            actions=dataset.actions[:, None, :],
+        )
+
+    n_samples = len(dataset)
+    n_windows = n_samples - history_length + 1
+
+    if n_windows <= 0:
+        raise ValueError(
+            f"Dataset has {n_samples} samples but "
+            f"history_length={history_length}. "
+            "Need at least history_length samples."
+        )
+
+    # Create sliding windows using advanced indexing
+    indices = jnp.arange(history_length)[:, None] + jnp.arange(
+        n_windows
+    )[None, :]
+    indices = indices.T  # Shape: (n_windows, history_length)
+
+    # Extract windows
+    state_windows = dataset.states[indices]
+    action_windows = dataset.actions[indices]
+
+    # Targets are the next_states after the last step in each window
+    target_indices = jnp.arange(history_length - 1, n_samples)
+    next_states = dataset.next_states[target_indices]
+    accelerations = dataset.accelerations[target_indices]
+
+    return DynamicsDataset(
+        states=state_windows,
+        actions=action_windows,
+        next_states=next_states,
+        accelerations=accelerations,
+        state_dim=dataset.state_dim,
+        action_dim=dataset.action_dim,
+        nq=dataset.nq,
+        nv=dataset.nv,
+        dt=dataset.dt,
+    )
+
+
 def split_dataset(
     dataset: DynamicsDataset,
     train_ratio: float = 0.8,

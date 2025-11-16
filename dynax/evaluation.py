@@ -1,7 +1,7 @@
 """Optimized evaluation utilities for dynamics models."""
 
 from pathlib import Path
-from typing import Callable, Dict, Optional
+from typing import Callable, Dict, Optional, Tuple
 
 import jax
 import jax.numpy as jnp
@@ -250,35 +250,64 @@ def create_rollout_fn(
     model: BaseDynamicsModel,
     params: DynamicsModelParams,
 ) -> Callable[[jax.Array, jax.Array], jax.Array]:
-    """Create a JIT-compiled rollout function.
+    """Create a JIT-compiled rollout function with history buffer support.
 
     Args:
         model: Dynamics model.
         params: Model parameters.
 
     Returns:
-        JIT-compiled function that takes (initial_state, actions) and returns
-        trajectory of states.
+        JIT-compiled function that takes (initial_states, actions) and returns
+        trajectory of states. Initial_states has shape (history_length, state_dim).
     """
 
     @jax.jit
-    def rollout_fn(initial_state: jax.Array, actions: jax.Array) -> jax.Array:
-        """Roll out trajectory using neural dynamics model.
+    def rollout_fn(
+        initial_states: jax.Array, actions: jax.Array
+    ) -> jax.Array:
+        """Roll out trajectory using neural dynamics model with history buffer.
 
         Args:
-            initial_state: Initial state, shape (state_dim,).
+            initial_states: Initial state history, shape (history_length, state_dim).
             actions: Actions sequence, shape (T, action_dim).
 
         Returns:
             State trajectory, shape (T+1, state_dim).
+            First state is the most recent from initial_states.
         """
+        history_length = model.history_length
 
-        def step_fn(state, action):
-            next_state = model.step(params, state, action)
-            return next_state, next_state
+        def step_fn(
+            carry: Tuple[jax.Array, jax.Array], action: jax.Array
+        ) -> Tuple:
+            """Step with history buffer."""
+            state_history, action_history = carry
 
-        _, states = jax.lax.scan(step_fn, initial_state, actions)
-        return jnp.concatenate([initial_state[None, :], states], axis=0)
+            # Update action history
+            action_history = jnp.concatenate(
+                [action_history[1:], action[None, :]], axis=0
+            )
+
+            # Predict next state
+            next_state = model.step(params, state_history, action_history)
+
+            # Update state history
+            state_history = jnp.concatenate(
+                [state_history[1:], next_state[None, :]], axis=0
+            )
+
+            return (state_history, action_history), next_state
+
+        # Initialize action history with zeros
+        action_history = jnp.zeros((history_length, actions.shape[-1]))
+
+        # Run scan
+        _, states = jax.lax.scan(
+            step_fn, (initial_states, action_history), actions
+        )
+
+        # Prepend the most recent initial state
+        return jnp.concatenate([initial_states[-1:], states], axis=0)
 
     return rollout_fn
 
@@ -323,7 +352,7 @@ def create_true_rollout_fn(
 def evaluate_rollout(
     neural_rollout_fn: Callable,
     true_rollout_fn: Callable,
-    initial_state: jax.Array,
+    initial_states: jax.Array,
     initial_data: mjx.Data,
     actions: jax.Array,
 ) -> Dict[str, jax.Array]:
@@ -332,7 +361,7 @@ def evaluate_rollout(
     Args:
         neural_rollout_fn: Neural model rollout function.
         true_rollout_fn: True dynamics rollout function.
-        initial_state: Initial state features, shape (state_dim,).
+        initial_states: Initial state history, shape (history_length, state_dim).
         initial_data: Initial MJX data.
         actions: Actions sequence, shape (T, action_dim).
 
@@ -348,7 +377,7 @@ def evaluate_rollout(
     """
     # Run rollouts
     true_states = true_rollout_fn(initial_data, actions)
-    pred_states = neural_rollout_fn(initial_state, actions)
+    pred_states = neural_rollout_fn(initial_states, actions)
 
     # Compute errors
     errors = jnp.abs(pred_states - true_states)
@@ -385,7 +414,7 @@ def evaluate_rollouts_batch(
     Args:
         model: MJX model for true dynamics.
         neural_rollout_fn: Neural model rollout function.
-        initial_states: Initial state features, shape (N, state_dim).
+        initial_states: Initial state histories, shape (N, history_length, state_dim).
         actions_batch: Actions sequences, shape (N, T, action_dim).
         return_trajectories: If True, also return individual trajectories.
 
@@ -399,9 +428,11 @@ def evaluate_rollouts_batch(
         - pred_trajectories: (if return_trajectories=True) Predicted trajectories, shape (N, T+1, state_dim).
     """
 
-    def single_rollout_eval(initial_state, actions):
+    def single_rollout_eval(initial_state_history, actions):
         """Evaluate single rollout (vmappable)."""
-        # Create initial MJX data from state
+        # Create initial MJX data from most recent state in history
+        # initial_state_history has shape (history_length, state_dim)
+        initial_state = initial_state_history[-1, :]  # Most recent state
         initial_data = mjx.make_data(model)
         nq = model.nq
         initial_data = initial_data.replace(
@@ -421,7 +452,7 @@ def evaluate_rollouts_batch(
         true_states = jnp.concatenate([initial_features[None, :], true_states], axis=0)
 
         # Neural rollout
-        pred_states = neural_rollout_fn(initial_state, actions)
+        pred_states = neural_rollout_fn(initial_state_history, actions)
 
         # Compute errors
         errors = jnp.abs(pred_states - true_states)

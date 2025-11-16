@@ -29,12 +29,12 @@ class MLPDynamicsModel(BaseDynamicsModel):
     activation: str = "relu"
 
     @nn.compact
-    def __call__(self, state: jax.Array, action: jax.Array) -> jax.Array:
-        """Predict state delta from state and action.
+    def __call__(self, states: jax.Array, actions: jax.Array) -> jax.Array:
+        """Predict state delta from state-action history.
 
         Args:
-            state: Current state, shape (state_dim,).
-            action: Current action, shape (action_dim,).
+            states: State history, shape (history_length, state_dim).
+            actions: Action history, shape (history_length, action_dim).
 
         Returns:
             Predicted state delta, shape (state_dim,).
@@ -49,8 +49,11 @@ class MLPDynamicsModel(BaseDynamicsModel):
         else:
             raise ValueError(f"Unknown activation: {self.activation}")
 
-        # Concatenate state and action
-        x = jnp.concatenate([state, action], axis=-1)
+        # Interleave state-action pairs: [s_0, a_0, s_1, a_1, ..., s_h, a_h]
+        # This makes it easier for the model to associate states with actions
+        # Reshape to (history_length, state_dim + action_dim) then flatten
+        state_action_pairs = jnp.concatenate([states, actions], axis=-1)
+        x = state_action_pairs.flatten()
 
         # Hidden layers
         for i, dim in enumerate(self.hidden_dims):
@@ -58,6 +61,7 @@ class MLPDynamicsModel(BaseDynamicsModel):
             x = act_fn(x)
 
         # Output layer predicts state delta
-        delta = nn.Dense(self.env.model.nq + self.env.model.nv, name="output")(x)
+        output_dim = self.env.model.nq + self.env.model.nv
+        delta = nn.Dense(output_dim, name="output")(x)
 
         return delta

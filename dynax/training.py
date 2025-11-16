@@ -107,13 +107,17 @@ def create_loss_fn(
             actions = actions + jax.random.normal(rng_action, actions.shape) * noise_std
             targets = targets + jax.random.normal(rng_target, targets.shape) * noise_std
 
-        # Normalize states, actions, and targets
-        states_norm = jax.vmap(normalize_state, in_axes=(0, None, None))(
-            states, state_mean, state_std
-        )
-        actions_norm = jax.vmap(normalize_action, in_axes=(0, None, None))(
-            actions, action_mean, action_std
-        )
+        # Normalize states and actions (vmap over batch and history dimensions)
+        # states: (batch, history_length, state_dim)
+        # actions: (batch, history_length, action_dim)
+        states_norm = jax.vmap(
+            jax.vmap(normalize_state, in_axes=(0, None, None)),
+            in_axes=(0, None, None),
+        )(states, state_mean, state_std)
+        actions_norm = jax.vmap(
+            jax.vmap(normalize_action, in_axes=(0, None, None)),
+            in_axes=(0, None, None),
+        )(actions, action_mean, action_std)
         targets_norm = jax.vmap(normalize_state, in_axes=(0, None, None))(
             targets, output_mean, output_std
         )
@@ -364,7 +368,15 @@ def _print_evaluation_summary(
             data = mjx.forward(env.model, data)
             return jnp.concatenate([data.qpos, data.qvel])
 
-        initial_states = jax.vmap(reset_single)(reset_rngs)
+        # Get single initial states
+        initial_states_single = jax.vmap(reset_single)(reset_rngs)
+
+        # Create history windows by repeating the initial state
+        # Shape: (eval_num_rollouts, history_length, state_dim)
+        history_length = model.history_length
+        initial_states = jnp.repeat(
+            initial_states_single[:, None, :], history_length, axis=1
+        )
 
         # Pre-generate all random actions
         rng, action_rng = jax.random.split(rng)
@@ -498,25 +510,37 @@ def train_dynamics_model(
     Returns:
         Trained model parameters.
     """
-    # Let the model specify what it predicts
+    # Apply history windowing to datasets FIRST
+    from dynax.utils.data import create_history_windows
+
+    train_dataset = create_history_windows(
+        train_dataset, model.history_length
+    )
+    val_dataset = create_history_windows(val_dataset, model.history_length)
+
+    # Compute targets AFTER windowing (targets align with windowed dataset)
     train_targets = model.prepare_training_targets(train_dataset)
     val_targets = model.prepare_training_targets(val_dataset)
 
-    # Compute normalization statistics
+    # Compute normalization statistics on windowed data
+    # Flatten all states/actions from all windows for consistent normalization
+    # This ensures all timesteps in history are normalized with same stats
+    train_states_flat = train_dataset.states.reshape(-1, train_dataset.state_dim)
+    train_actions_flat = train_dataset.actions.reshape(-1, train_dataset.action_dim)
+    
     state_mean, state_std, output_mean, output_std = (
-        compute_normalization_stats(train_dataset.states, train_targets)
+        compute_normalization_stats(train_states_flat, train_targets)
     )
-
-    # Compute action normalization statistics
+    
     action_mean, action_std = compute_action_normalization_stats(
-        train_dataset.actions
+        train_actions_flat
     )
 
-    # Initialize model parameters
+    # Initialize model parameters with history-shaped inputs
     rng, subrng = jax.random.split(rng)
-    dummy_state = jnp.zeros(model.state_dim)
-    dummy_action = jnp.zeros(model.action_dim)
-    params = model.init(subrng, dummy_state, dummy_action)
+    dummy_states = jnp.zeros((model.history_length, model.state_dim))
+    dummy_actions = jnp.zeros((model.history_length, model.action_dim))
+    params = model.init(subrng, dummy_states, dummy_actions)
 
     # Create optimizer
     optimizer = optax.adam(config.learning_rate)

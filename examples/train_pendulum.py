@@ -5,7 +5,7 @@ from hydrax.algs import PredictiveSampling
 from hydrax.tasks.pendulum import Pendulum as HydraxPendulumTask
 
 from dynax import TrainingConfig, train_dynamics_model
-from dynax.architectures import ResNetDynamicsModel
+from dynax.architectures import ResNetDynamicsModel, TransformerDynamicsModel
 from dynax.envs import PendulumEnv
 from dynax.utils import HydraxController, collect_and_prepare_data
 
@@ -35,11 +35,15 @@ train_dataset, val_dataset = collect_and_prepare_data(
 )
 
 # Train model
-dynamics_model = ResNetDynamicsModel(
+dynamics_model = TransformerDynamicsModel(
     env=env,
-    hidden_dim=500,
-    num_blocks=2,
-    activation="relu",
+    history_length=10,
+    embed_dim=256,
+    num_heads=8,
+    num_layers=6,
+    ff_dim=1024,
+    dropout=0.1,
+    activation="gelu",
 )
 
 rng, train_rng = jax.random.split(rng)
@@ -48,7 +52,7 @@ trained_params = train_dynamics_model(
     train_dataset=train_dataset,
     val_dataset=val_dataset,
     config=TrainingConfig(
-        num_epochs=200,
+        num_epochs=1000,
         batch_size=512,
         learning_rate=1e-3,
         noise_std=0.01,

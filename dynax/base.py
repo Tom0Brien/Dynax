@@ -37,9 +37,12 @@ class BaseDynamicsModel(nn.Module):
 
     Attributes:
         env: Environment providing model dimensions and timestep.
+        history_length: Number of past (state, action) pairs to use as input.
+            Default is 1 (single step, backward compatible).
     """
 
     env: Env
+    history_length: int = 1
 
     @property
     def state_dim(self) -> int:
@@ -57,34 +60,59 @@ class BaseDynamicsModel(nn.Module):
         return self.env.dt
 
     @abstractmethod
-    def __call__(self, state: jax.Array, action: jax.Array) -> jax.Array:
-        """Predict the model output given current state and action."""
+    def __call__(
+        self, states: jax.Array, actions: jax.Array
+    ) -> jax.Array:
+        """Predict the model output given state-action history.
+
+        Args:
+            states: State history, shape (history_length, state_dim).
+            actions: Action history, shape (history_length, action_dim).
+
+        Returns:
+            Predicted output (e.g., next state delta), shape (output_dim,).
+        """
         pass
 
     def prepare_training_targets(self, dataset) -> jax.Array:
         """Prepare training targets from a dataset.
 
         Override this method to specify what your model predicts.
-        Default: state deltas (next_state - state).
+        Default: state deltas (next_state - current_state).
 
         Args:
             dataset: DynamicsDataset with states, actions, next_states, etc.
+                States may be windowed (N, history_length, state_dim) or
+                single-step (N, state_dim).
 
         Returns:
             Training targets with shape (N, output_dim).
         """
-        return dataset.next_states - dataset.states
+        # Handle windowed states: use most recent state from history
+        if dataset.states.ndim == 3:
+            current_states = dataset.states[:, -1, :]  # Most recent state
+        else:
+            current_states = dataset.states
+        return dataset.next_states - current_states
 
     def step(
         self,
         params: DynamicsModelParams,
-        state: jax.Array,
-        action: jax.Array,
+        states: jax.Array,
+        actions: jax.Array,
     ) -> jax.Array:
         """Predict next state using the trained model.
 
         Default implementation for residual/delta-based models.
         Override this method for physics-informed models (like Euler).
+
+        Args:
+            params: Model parameters.
+            states: State history, shape (history_length, state_dim).
+            actions: Action history, shape (history_length, action_dim).
+
+        Returns:
+            Next state, shape (state_dim,).
         """
         from dynax.utils.normalization import (
             denormalize_output,
@@ -92,17 +120,17 @@ class BaseDynamicsModel(nn.Module):
             normalize_state,
         )
 
-        # Normalize state and action
-        state_norm = normalize_state(
-            state, params.state_mean, params.state_std
+        # Normalize states and actions (vmap over history dimension)
+        states_norm = jax.vmap(normalize_state, in_axes=(0, None, None))(
+            states, params.state_mean, params.state_std
         )
-        action_norm = normalize_action(
-            action, params.action_mean, params.action_std
+        actions_norm = jax.vmap(normalize_action, in_axes=(0, None, None))(
+            actions, params.action_mean, params.action_std
         )
 
         # Predict normalized output
         output_norm = self.apply(
-            params.network_params, state_norm, action_norm
+            params.network_params, states_norm, actions_norm
         )
 
         # Denormalize output
@@ -110,6 +138,7 @@ class BaseDynamicsModel(nn.Module):
             output_norm, params.output_mean, params.output_std
         )
 
-        # Default: residual dynamics (next_state = state + output)
-        return state + output
+        # Default: residual dynamics (next_state = current_state + output)
+        # Use the most recent state from history
+        return states[-1] + output
 

@@ -75,12 +75,12 @@ class ResNetDynamicsModel(BaseDynamicsModel):
     activation: str = "relu"
 
     @nn.compact
-    def __call__(self, state: jax.Array, action: jax.Array) -> jax.Array:
-        """Predict state delta from state and action.
+    def __call__(self, states: jax.Array, actions: jax.Array) -> jax.Array:
+        """Predict state delta from state-action history.
 
         Args:
-            state: Current state, shape (state_dim,).
-            action: Current action, shape (action_dim,).
+            states: State history, shape (history_length, state_dim).
+            actions: Action history, shape (history_length, action_dim).
 
         Returns:
             Predicted state delta, shape (state_dim,).
@@ -95,8 +95,10 @@ class ResNetDynamicsModel(BaseDynamicsModel):
         else:
             raise ValueError(f"Unknown activation: {self.activation}")
 
-        # Concatenate state and action
-        x = jnp.concatenate([state, action], axis=-1)
+        # Interleave state-action pairs: [s_0, a_0, s_1, a_1, ..., s_h, a_h]
+        # Reshape to (history_length, state_dim + action_dim) then flatten
+        state_action_pairs = jnp.concatenate([states, actions], axis=-1)
+        x = state_action_pairs.flatten()
 
         # Initial projection to hidden dimension
         x = nn.Dense(self.hidden_dim, name="input_proj")(x)
