@@ -1,9 +1,14 @@
 """Optimized evaluation utilities for dynamics models."""
 
+from pathlib import Path
 from typing import Callable, Dict, Optional, Tuple
 
 import jax
 import jax.numpy as jnp
+import matplotlib
+matplotlib.use("Agg")  # Non-interactive backend
+import matplotlib.pyplot as plt
+import numpy as np
 from mujoco import mjx
 
 from dynax.base import BaseDynamicsModel, DynamicsModelParams
@@ -231,6 +236,7 @@ def evaluate_rollouts_batch(
     neural_rollout_fn: Callable,
     initial_states: jax.Array,
     actions_batch: jax.Array,
+    return_trajectories: bool = False,
 ) -> Dict[str, jax.Array]:
     """Evaluate multiple rollouts in parallel using vmap.
 
@@ -239,6 +245,7 @@ def evaluate_rollouts_batch(
         neural_rollout_fn: Neural model rollout function.
         initial_states: Initial state features, shape (N, state_dim).
         actions_batch: Actions sequences, shape (N, T, action_dim).
+        return_trajectories: If True, also return individual trajectories.
 
     Returns:
         Dictionary with metrics averaged over rollouts:
@@ -246,6 +253,8 @@ def evaluate_rollouts_batch(
         - rmse_over_time: Root mean squared error over time, shape (T+1,).
         - final_mae: Final step MAE (scalar).
         - final_rmse: Final step RMSE (scalar).
+        - true_trajectories: (if return_trajectories=True) True trajectories, shape (N, T+1, state_dim).
+        - pred_trajectories: (if return_trajectories=True) Predicted trajectories, shape (N, T+1, state_dim).
     """
 
     def single_rollout_eval(initial_state, actions):
@@ -279,21 +288,113 @@ def evaluate_rollouts_batch(
         mae_over_time = jnp.mean(errors, axis=1)
         rmse_over_time = jnp.sqrt(jnp.mean(squared_errors, axis=1))
 
-        return {
+        result = {
             "mae_over_time": mae_over_time,
             "rmse_over_time": rmse_over_time,
             "final_mae": mae_over_time[-1],
             "final_rmse": rmse_over_time[-1],
         }
 
+        if return_trajectories:
+            result["true_states"] = true_states
+            result["pred_states"] = pred_states
+
+        return result
+
     # Vmap over all rollouts in parallel
     results = jax.vmap(single_rollout_eval)(initial_states, actions_batch)
 
     # Average metrics
-    return {
+    output = {
         "mae_over_time": jnp.mean(results["mae_over_time"], axis=0),
         "rmse_over_time": jnp.mean(results["rmse_over_time"], axis=0),
         "final_mae": jnp.mean(results["final_mae"]),
         "final_rmse": jnp.mean(results["final_rmse"]),
     }
+
+    if return_trajectories:
+        output["true_trajectories"] = results["true_states"]
+        output["pred_trajectories"] = results["pred_states"]
+
+    return output
+
+
+def plot_trajectories(
+    true_trajectories: jax.Array,
+    pred_trajectories: jax.Array,
+    state_dim: int,
+    nq: int,
+    num_plots: int = 5,
+    save_path: Optional[Path] = None,
+) -> np.ndarray:
+    """Create trajectory comparison plots.
+
+    Args:
+        true_trajectories: True trajectories, shape (N, T+1, state_dim).
+        pred_trajectories: Predicted trajectories, shape (N, T+1, state_dim).
+        state_dim: Total state dimension.
+        nq: Number of position dimensions.
+        num_plots: Number of rollouts to plot.
+        save_path: Optional path to save the figure.
+
+    Returns:
+        Figure as numpy array for TensorBoard (shape: H, W, 3).
+    """
+    num_rollouts = min(num_plots, len(true_trajectories))
+    nv = state_dim - nq
+
+    # Create subplots: one row per rollout, one column per state dimension
+    fig, axes = plt.subplots(
+        num_rollouts, state_dim, figsize=(3 * state_dim, 2 * num_rollouts)
+    )
+    if num_rollouts == 1:
+        axes = axes[None, :]
+    if state_dim == 1:
+        axes = axes[:, None]
+
+    time_steps = np.arange(len(true_trajectories[0]))
+
+    for rollout_idx in range(num_rollouts):
+        true_traj = np.array(true_trajectories[rollout_idx])
+        pred_traj = np.array(pred_trajectories[rollout_idx])
+
+        for dim_idx in range(state_dim):
+            ax = axes[rollout_idx, dim_idx]
+
+            ax.plot(time_steps, true_traj[:, dim_idx], "b-", label="True", linewidth=2)
+            ax.plot(
+                time_steps, pred_traj[:, dim_idx], "r--", label="Predicted", linewidth=2
+            )
+
+            # Label first row
+            if rollout_idx == 0:
+                if dim_idx < nq:
+                    ax.set_title(f"Position {dim_idx}")
+                else:
+                    ax.set_title(f"Velocity {dim_idx - nq}")
+
+            # Label first column
+            if dim_idx == 0:
+                ax.set_ylabel(f"Rollout {rollout_idx + 1}")
+
+            ax.grid(True, alpha=0.3)
+            ax.legend(fontsize=8)
+
+    plt.tight_layout()
+
+    # Save figure if path provided
+    if save_path is not None:
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+        plt.savefig(save_path, dpi=150, bbox_inches="tight")
+
+    # Convert to numpy array for TensorBoard
+    fig.canvas.draw()
+    # Get RGBA buffer and convert to RGB
+    buf = np.frombuffer(fig.canvas.buffer_rgba(), dtype=np.uint8)
+    width, height = fig.canvas.get_width_height()
+    buf = buf.reshape((height, width, 4))[:, :, :3]  # Remove alpha channel
+
+    plt.close(fig)
+
+    return buf
 

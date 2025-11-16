@@ -132,6 +132,7 @@ source = { editable = "." }
 dependencies = [
     { name = "flax" },
     { name = "jax", extra = ["cuda12"] },
+    { name = "matplotlib" },
     { name = "mujoco" },
     { name = "mujoco-mjx" },
     { name = "optax" },
@@ -141,7 +142,6 @@ dependencies = [
 
 [package.optional-dependencies]
 dev = [
-    { name = "matplotlib" },
     { name = "pytest" },
     { name = "ruff" },
 ]
@@ -150,7 +150,7 @@ dev = [
 requires-dist = [
     { name = "flax", specifier = ">=0.10.0" },
     { name = "jax", extras = ["cuda12"], specifier = ">=0.4.35" },
-    { name = "matplotlib", marker = "extra == 'dev'", specifier = ">=3.9.0" },
+    { name = "matplotlib", specifier = ">=3.9.0" },
     { name = "mujoco", specifier = ">=3.2.4" },
     { name = "mujoco-mjx", specifier = ">=3.2.4" },
     { name = "optax", specifier = ">=0.2.0" },

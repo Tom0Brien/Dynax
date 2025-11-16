@@ -374,9 +374,13 @@ def _print_evaluation_summary(
             maxval=env.action_max,
         )
 
-        # Evaluate all rollouts in parallel
+        # Evaluate all rollouts in parallel (with trajectories for plotting)
         rollout_results = evaluate_rollouts_batch(
-            env.model, neural_rollout, initial_states, actions_batch
+            env.model,
+            neural_rollout,
+            initial_states,
+            actions_batch,
+            return_trajectories=True,
         )
 
         # Compute std dev for reporting
@@ -413,6 +417,8 @@ def _print_evaluation_summary(
 
         # Log to TensorBoard
         if tb_writer is not None:
+            from dynax.evaluation import plot_trajectories
+
             tb_writer.add_scalar("eval/rollout_final_mae", float(rollout_results["final_mae"]), 0)
             tb_writer.add_scalar("eval/rollout_final_mae_std", float(std_final_mae), 0)
             tb_writer.add_scalar("eval/rollout_final_rmse", float(rollout_results["final_rmse"]), 0)
@@ -422,6 +428,27 @@ def _print_evaluation_summary(
             for t, (mae_t, rmse_t) in enumerate(zip(mae_over_time, rmse_over_time)):
                 tb_writer.add_scalar("eval/rollout_mae_over_time", float(mae_t), t)
                 tb_writer.add_scalar("eval/rollout_rmse_over_time", float(rmse_t), t)
+
+            # Create and log trajectory plots
+            true_trajs = rollout_results["true_trajectories"]
+            pred_trajs = rollout_results["pred_trajectories"]
+            state_dim = true_trajs.shape[-1]
+            nq = env.model.nq
+
+            # Create trajectory plots
+            plot_array = plot_trajectories(
+                true_trajs,
+                pred_trajs,
+                state_dim=state_dim,
+                nq=nq,
+                num_plots=5,
+                save_path=Path(tb_writer.logdir) / "trajectory_plots.png",
+            )
+
+            # Log to TensorBoard (add_image expects CHW format)
+            tb_writer.add_image(
+                "eval/trajectories", plot_array.transpose(2, 0, 1), 0, dataformats="CHW"
+            )
 
     print("\n" + "=" * 60)
 
@@ -521,11 +548,14 @@ def train_dynamics_model(
 
     # Set up TensorBoard logging
     tb_writer = None
+    log_dir_path = None
     if config.log_dir is not None:
-        log_dir = Path(config.log_dir) / datetime.now().strftime("%Y%m%d_%H%M%S")
-        log_dir.mkdir(parents=True, exist_ok=True)
-        print(f"TensorBoard logging to {log_dir}")
-        tb_writer = SummaryWriter(str(log_dir))
+        log_dir_path = Path(config.log_dir) / datetime.now().strftime("%Y%m%d_%H%M%S")
+        log_dir_path.mkdir(parents=True, exist_ok=True)
+        print(f"TensorBoard logging to {log_dir_path}")
+        tb_writer = SummaryWriter(str(log_dir_path))
+        # Store logdir for later use
+        tb_writer.logdir = str(log_dir_path)
 
     # Training loop
     for epoch in range(config.num_epochs):

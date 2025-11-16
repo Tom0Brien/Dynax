@@ -21,11 +21,11 @@ dependencies = [
     "mujoco-mjx>=3.2.4",
     "tensorboardX>=2.6.0",
     "tensorboard>=2.18.0",
+    "matplotlib>=3.9.0",
 ]
 
 [project.optional-dependencies]
 dev = [
-    "matplotlib>=3.9.0",
     "pytest>=8.0.0",
     "ruff>=0.7.0",
 ]
