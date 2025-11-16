@@ -29,12 +29,15 @@ class MLPDynamicsModel(BaseDynamicsModel):
     activation: str = "relu"
 
     @nn.compact
-    def __call__(self, states: jax.Array, actions: jax.Array) -> jax.Array:
+    def __call__(
+        self, states: jax.Array, actions: jax.Array, training: bool = False
+    ) -> jax.Array:
         """Predict state delta from state-action history.
 
         Args:
             states: State history, shape (history_length, state_dim).
             actions: Action history, shape (history_length, action_dim).
+            training: Whether in training mode (unused for MLP).
 
         Returns:
             Predicted state delta, shape (state_dim,).

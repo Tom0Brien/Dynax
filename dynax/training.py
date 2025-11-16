@@ -43,7 +43,7 @@ class TrainingConfig:
     batch_size: int = 512
     num_epochs: int = 100
     weight_decay: float = 1e-4
-    grad_clip: float = None
+    grad_clip: float = 1.0  # Default gradient clipping for stability
     noise_std: float = 0.01
     loss_fn: Callable = None
     log_dir: Optional[str | Path] = None
@@ -100,9 +100,16 @@ def create_loss_fn(
         rng: jax.Array = None,
     ) -> Tuple[jax.Array, dict]:
         """Compute MSE loss between predicted and actual outputs."""
+        # Split RNG for noise and dropout
+        if rng is not None:
+            rng_noise, rng_dropout = jax.random.split(rng, 2)
+        else:
+            rng_noise = None
+            rng_dropout = None
+
         # Add Gaussian noise for robustness (if noise_std > 0)
-        if noise_std > 0 and rng is not None:
-            rng_state, rng_action, rng_target = jax.random.split(rng, 3)
+        if noise_std > 0 and rng_noise is not None:
+            rng_state, rng_action, rng_target = jax.random.split(rng_noise, 3)
             states = states + jax.random.normal(rng_state, states.shape) * noise_std
             actions = actions + jax.random.normal(rng_action, actions.shape) * noise_std
             targets = targets + jax.random.normal(rng_target, targets.shape) * noise_std
@@ -122,10 +129,23 @@ def create_loss_fn(
             targets, output_mean, output_std
         )
 
-        # Predict normalized outputs
-        pred_outputs_norm = jax.vmap(model.apply, in_axes=(None, 0, 0))(
-            params, states_norm, actions_norm
-        )
+        # Predict normalized outputs (training=True for dropout)
+        # Flax requires RNGs to be passed via rngs parameter
+        if rng_dropout is not None:
+            # Split RNG for each sample in batch
+            rngs_batch = jax.random.split(rng_dropout, states_norm.shape[0])
+            pred_outputs_norm = jax.vmap(
+                lambda p, s, a, r: model.apply(
+                    p, s, a, training=True, rngs={"dropout": r}
+                ),
+                in_axes=(None, 0, 0, 0),
+            )(params, states_norm, actions_norm, rngs_batch)
+        else:
+            # No RNG: use deterministic mode (no dropout)
+            pred_outputs_norm = jax.vmap(
+                lambda p, s, a: model.apply(p, s, a, training=False),
+                in_axes=(None, 0, 0),
+            )(params, states_norm, actions_norm)
 
         # Compute MSE loss in normalized space
         mse_loss = jnp.mean(jnp.square(pred_outputs_norm - targets_norm))
@@ -178,7 +198,9 @@ def train_step(
 
     # Optionally clip gradients
     if grad_clip is not None:
-        grads = optax.clip_by_global_norm(grad_clip)(grads)
+        grads, _ = optax.clip_by_global_norm(grad_clip).update(
+            grads, None
+        )
 
     # Update parameters
     updates, new_opt_state = optimizer.update(
@@ -200,6 +222,8 @@ def prepare_epoch_batches(
 ) -> Tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
     """Prepare all batches for an epoch by pre-shuffling.
 
+    Optimized for large datasets by using JIT-compiled operations.
+
     Args:
         dataset: The dynamics dataset.
         targets: Training targets (state deltas or accelerations).
@@ -210,32 +234,43 @@ def prepare_epoch_batches(
         Tuple of (states_batches, actions_batches, targets_batches, rngs_batches) where
         each has shape (num_batches, batch_size, ...).
     """
-    num_samples = len(dataset)
-    num_batches = (num_samples + batch_size - 1) // batch_size
-
     # Split RNG for shuffling and noise
     shuffle_rng, noise_rng = jax.random.split(rng)
 
-    # Shuffle indices once for the entire epoch
-    indices = jax.random.permutation(shuffle_rng, num_samples)
+    # JIT-compiled shuffle function for better performance
+    @jax.jit
+    def _shuffle_and_batch(indices_rng, states, actions, targets_arr):
+        """Shuffle and create batches in one compiled operation."""
+        indices_rng, noise_rng = jax.random.split(indices_rng)
+        indices = jax.random.permutation(indices_rng, len(states))
+        
+        # Pad if needed
+        remainder = len(states) % batch_size
+        if remainder > 0:
+            padding_size = batch_size - remainder
+            padding_indices = jnp.tile(indices[-1:], (padding_size,))
+            indices = jnp.concatenate([indices, padding_indices])
+        
+        # Reshape into batches
+        num_batches_padded = len(indices) // batch_size
+        indices_reshaped = indices.reshape(num_batches_padded, batch_size)
+        
+        # Use advanced indexing to get all batches
+        states_batches = states[indices_reshaped]
+        actions_batches = actions[indices_reshaped]
+        targets_batches = targets_arr[indices_reshaped]
+        
+        # Generate RNG keys for each batch
+        rngs_batches = jax.random.split(noise_rng, num_batches_padded)
+        
+        return states_batches, actions_batches, targets_batches, rngs_batches
 
-    # Pad dataset to be divisible by batch_size
-    remainder = num_samples % batch_size
-    if remainder > 0:
-        padding_size = batch_size - remainder
-        padding_indices = jnp.tile(indices[-1:], (padding_size,))
-        indices = jnp.concatenate([indices, padding_indices])
-
-    # Reshape into batches
-    indices_reshaped = indices.reshape(num_batches, batch_size)
-
-    # Use advanced indexing to get all batches at once
-    states_batches = dataset.states[indices_reshaped]
-    actions_batches = dataset.actions[indices_reshaped]
-    targets_batches = targets[indices_reshaped]
-
-    # Generate RNG keys for each batch (for noise augmentation)
-    rngs_batches = jax.random.split(noise_rng, num_batches)
+    # Use JIT-compiled function for better performance on large datasets
+    states_batches, actions_batches, targets_batches, rngs_batches = (
+        _shuffle_and_batch(
+            shuffle_rng, dataset.states, dataset.actions, targets
+        )
+    )
 
     return states_batches, actions_batches, targets_batches, rngs_batches
 
@@ -270,7 +305,9 @@ def create_epoch_train_fn(
 
         # Optionally clip gradients
         if grad_clip is not None:
-            grads = optax.clip_by_global_norm(grad_clip)(grads)
+            grads, _ = optax.clip_by_global_norm(grad_clip).update(
+                grads, None
+            )
 
         # Update parameters
         updates, new_opt_state = optimizer.update(
@@ -575,11 +612,85 @@ def train_dynamics_model(
         loss_fn, optimizer, config.grad_clip
     )
 
-    # JIT-compiled validation function (no noise augmentation for validation)
+    # Prepare validation batches (pad last batch if needed)
+    val_batch_size = config.batch_size
+    val_num_samples = len(val_dataset.states)
+    val_num_batches = (val_num_samples + val_batch_size - 1) // val_batch_size
+    
+    # Pad validation data to make all batches the same size
+    val_pad_size = val_num_batches * val_batch_size - val_num_samples
+    if val_pad_size > 0:
+        # Pad with zeros (will be masked out in loss)
+        val_states_padded = jnp.concatenate([
+            val_dataset.states,
+            jnp.zeros((val_pad_size, *val_dataset.states.shape[1:]))
+        ], axis=0)
+        val_actions_padded = jnp.concatenate([
+            val_dataset.actions,
+            jnp.zeros((val_pad_size, *val_dataset.actions.shape[1:]))
+        ], axis=0)
+        val_targets_padded = jnp.concatenate([
+            val_targets,
+            jnp.zeros((val_pad_size, *val_targets.shape[1:]))
+        ], axis=0)
+    else:
+        val_states_padded = val_dataset.states
+        val_actions_padded = val_dataset.actions
+        val_targets_padded = val_targets
+    
+    # Reshape into batches: (num_batches, batch_size, ...)
+    val_states_batches = val_states_padded.reshape(
+        val_num_batches, val_batch_size, *val_states_padded.shape[1:]
+    )
+    val_actions_batches = val_actions_padded.reshape(
+        val_num_batches, val_batch_size, *val_actions_padded.shape[1:]
+    )
+    val_targets_batches = val_targets_padded.reshape(
+        val_num_batches, val_batch_size, *val_targets_padded.shape[1:]
+    )
+    
+    # Create mask for valid samples (to exclude padding)
+    val_mask = jnp.ones((val_num_batches, val_batch_size))
+    if val_pad_size > 0:
+        val_mask = val_mask.at[-1, -val_pad_size:].set(0.0)
+
+    # JIT-compiled validation function using scan
     @jax.jit
     def validate(params):
-        _, metrics = loss_fn(params, val_dataset.states, val_dataset.actions, val_targets, None)
-        return metrics
+        """Validate on entire validation set using scan."""
+        def scan_fn(carry, batch_data):
+            """Process a single validation batch."""
+            states_batch, actions_batch, targets_batch, mask_batch = batch_data
+            _, metrics = loss_fn(
+                params, states_batch, actions_batch, targets_batch, None
+            )
+            # Weight metrics by number of valid samples in this batch
+            # (metrics are already per-sample averages from loss_fn)
+            valid_count = mask_batch.sum()
+            weighted_metrics = {
+                k: v * valid_count for k, v in metrics.items()
+            }
+            return carry, (weighted_metrics, valid_count)
+
+        # Process all batches with scan
+        _, (all_metrics, valid_counts) = jax.lax.scan(
+            scan_fn,
+            None,
+            (
+                val_states_batches,
+                val_actions_batches,
+                val_targets_batches,
+                val_mask,
+            ),
+        )
+
+        # Sum weighted metrics and divide by total valid samples
+        total_valid = jnp.sum(valid_counts)
+        avg_metrics = {
+            k: jnp.sum(v) / total_valid
+            for k, v in all_metrics.items()
+        }
+        return avg_metrics
 
     # Set up TensorBoard logging
     tb_writer = None

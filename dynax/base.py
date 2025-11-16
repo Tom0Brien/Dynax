@@ -61,13 +61,14 @@ class BaseDynamicsModel(nn.Module):
 
     @abstractmethod
     def __call__(
-        self, states: jax.Array, actions: jax.Array
+        self, states: jax.Array, actions: jax.Array, training: bool = False
     ) -> jax.Array:
         """Predict the model output given state-action history.
 
         Args:
             states: State history, shape (history_length, state_dim).
             actions: Action history, shape (history_length, action_dim).
+            training: Whether in training mode (affects dropout, etc.).
 
         Returns:
             Predicted output (e.g., next state delta), shape (output_dim,).
@@ -128,9 +129,9 @@ class BaseDynamicsModel(nn.Module):
             actions, params.action_mean, params.action_std
         )
 
-        # Predict normalized output
+        # Predict normalized output (training=False for inference)
         output_norm = self.apply(
-            params.network_params, states_norm, actions_norm
+            params.network_params, states_norm, actions_norm, training=False
         )
 
         # Denormalize output

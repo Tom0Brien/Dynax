@@ -26,23 +26,24 @@ env = PendulumEnv()
 rng = jax.random.PRNGKey(0)
 train_dataset, val_dataset = collect_and_prepare_data(
     env=env,
-    num_rollouts=50,
+    num_rollouts=500,
     rollout_length=100,
     rng=rng,
     dataset_path="data/pendulum_dataset.pkl",
     controller=controller,
-    num_controlled_rollouts=20,  # 20 controlled + 30 random
+    num_controlled_rollouts=250,  # 20 controlled + 30 random
+    force_recollect=True,
 )
 
 # Train model
 dynamics_model = TransformerDynamicsModel(
     env=env,
     history_length=10,
-    embed_dim=256,
-    num_heads=8,
+    embed_dim=192,
+    num_heads=12,
     num_layers=6,
-    ff_dim=1024,
-    dropout=0.1,
+    ff_dim=768,
+    dropout=0.0,
     activation="gelu",
 )
 
@@ -52,7 +53,7 @@ trained_params = train_dynamics_model(
     train_dataset=train_dataset,
     val_dataset=val_dataset,
     config=TrainingConfig(
-        num_epochs=1000,
+        num_epochs=200,
         batch_size=512,
         learning_rate=1e-3,
         noise_std=0.01,
