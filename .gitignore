@@ -43,6 +43,7 @@ env/
 data/
 models/
 checkpoints/
+logs/
 
 # Logs
 *.log

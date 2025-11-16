@@ -1,11 +1,15 @@
 """Training utilities for neural network dynamics models."""
 
-from typing import Callable, Tuple
+import time
+from datetime import datetime
+from pathlib import Path
+from typing import Callable, Optional, Tuple
 
 import jax
 import jax.numpy as jnp
 import optax
 from flax.struct import dataclass
+from tensorboardX import SummaryWriter
 
 from dynax.base import BaseDynamicsModel, DynamicsModelParams
 from dynax.utils.data import DynamicsDataset
@@ -31,6 +35,7 @@ class TrainingConfig:
         noise_std: Std dev of Gaussian noise for input/output augmentation.
         loss_fn: Optional custom loss function with signature
             (params, states, actions, targets) -> (loss, metrics).
+        log_dir: Optional directory for TensorBoard logging. If None, no logging.
     """
 
     learning_rate: float = 1e-3
@@ -40,6 +45,7 @@ class TrainingConfig:
     grad_clip: float = None
     noise_std: float = 0.01
     loss_fn: Callable = None
+    log_dir: Optional[str | Path] = None
 
 
 @dataclass
@@ -311,6 +317,7 @@ def _print_evaluation_summary(
     eval_rollout_length: int,
     eval_num_rollouts: int,
     rng: jax.Array,
+    tb_writer: Optional[SummaryWriter] = None,
 ):
     """Print evaluation summary after training."""
     from dynax.evaluation import (
@@ -332,6 +339,11 @@ def _print_evaluation_summary(
     )
     print(f"  MAE:  {single_step_results['mae_mean']:.6f}")
     print(f"  RMSE: {single_step_results['rmse_mean']:.6f}")
+
+    # Log to TensorBoard
+    if tb_writer is not None:
+        tb_writer.add_scalar("eval/single_step_mae", float(single_step_results["mae_mean"]), 0)
+        tb_writer.add_scalar("eval/single_step_rmse", float(single_step_results["rmse_mean"]), 0)
 
     # Multi-step rollout evaluation (if env provided)
     if env is not None:
@@ -399,7 +411,24 @@ def _print_evaluation_summary(
         print(f"  Final RMSE: {rollout_results['final_rmse']:.6f}")
         print(f"  (averaged over {eval_num_rollouts} rollouts of length {eval_rollout_length})")
 
+        # Log to TensorBoard
+        if tb_writer is not None:
+            tb_writer.add_scalar("eval/rollout_final_mae", float(rollout_results["final_mae"]), 0)
+            tb_writer.add_scalar("eval/rollout_final_mae_std", float(std_final_mae), 0)
+            tb_writer.add_scalar("eval/rollout_final_rmse", float(rollout_results["final_rmse"]), 0)
+            # Log error over time
+            mae_over_time = rollout_results["mae_over_time"]
+            rmse_over_time = rollout_results["rmse_over_time"]
+            for t, (mae_t, rmse_t) in enumerate(zip(mae_over_time, rmse_over_time)):
+                tb_writer.add_scalar("eval/rollout_mae_over_time", float(mae_t), t)
+                tb_writer.add_scalar("eval/rollout_rmse_over_time", float(rmse_t), t)
+
     print("\n" + "=" * 60)
+
+    return {
+        "single_step": single_step_results,
+        "rollout": rollout_results if env is not None else None,
+    }
 
 
 def train_dynamics_model(
@@ -490,8 +519,17 @@ def train_dynamics_model(
         _, metrics = loss_fn(params, val_dataset.states, val_dataset.actions, val_targets, None)
         return metrics
 
+    # Set up TensorBoard logging
+    tb_writer = None
+    if config.log_dir is not None:
+        log_dir = Path(config.log_dir) / datetime.now().strftime("%Y%m%d_%H%M%S")
+        log_dir.mkdir(parents=True, exist_ok=True)
+        print(f"TensorBoard logging to {log_dir}")
+        tb_writer = SummaryWriter(str(log_dir))
+
     # Training loop
     for epoch in range(config.num_epochs):
+        epoch_start_time = time.time()
         # Prepare all batches for this epoch (pre-shuffled)
         rng, epoch_rng = jax.random.split(rng)
         batches = prepare_epoch_batches(
@@ -509,6 +547,24 @@ def train_dynamics_model(
             train_state = train_state.replace(
                 best_val_loss=val_metrics["loss"]
             )
+
+        # Log to TensorBoard
+        if tb_writer is not None:
+            tb_writer.add_scalar("train/loss", float(train_metrics["loss"]), epoch)
+            tb_writer.add_scalar("train/mse", float(train_metrics["mse"]), epoch)
+            tb_writer.add_scalar("train/mae", float(train_metrics["mae"]), epoch)
+            if "l2_loss" in train_metrics:
+                tb_writer.add_scalar("train/l2_loss", float(train_metrics["l2_loss"]), epoch)
+
+            tb_writer.add_scalar("val/loss", float(val_metrics["loss"]), epoch)
+            tb_writer.add_scalar("val/mse", float(val_metrics["mse"]), epoch)
+            tb_writer.add_scalar("val/mae", float(val_metrics["mae"]), epoch)
+
+            tb_writer.add_scalar("train/best_val_loss", float(train_state.best_val_loss), epoch)
+            tb_writer.add_scalar("train/learning_rate", config.learning_rate, epoch)
+
+            epoch_time = time.time() - epoch_start_time
+            tb_writer.add_scalar("train/epoch_time", epoch_time, epoch)
 
         # Print progress
         if verbose and (epoch % 10 == 0 or epoch == config.num_epochs - 1):
@@ -535,7 +591,7 @@ def train_dynamics_model(
 
     # Evaluation
     if verbose:
-        _print_evaluation_summary(
+        eval_results = _print_evaluation_summary(
             model,
             trained_params,
             val_dataset,
@@ -544,7 +600,12 @@ def train_dynamics_model(
             eval_rollout_length,
             eval_num_rollouts,
             rng,
+            tb_writer,
         )
+
+    # Close TensorBoard writer
+    if tb_writer is not None:
+        tb_writer.close()
 
     return trained_params
 

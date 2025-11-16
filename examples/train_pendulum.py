@@ -36,6 +36,7 @@ trained_params = train_dynamics_model(
         batch_size=512,
         learning_rate=1e-3,
         noise_std=0.01,
+        log_dir="logs/pendulum",  # TensorBoard logging
     ),
     rng=train_rng,
     env=env,
