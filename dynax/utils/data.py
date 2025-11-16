@@ -10,6 +10,8 @@ import numpy as np
 from flax.struct import dataclass
 from mujoco import mjx
 
+from dynax.utils.controllers import Controller
+
 
 @dataclass
 class DynamicsDataset:
@@ -54,6 +56,138 @@ def extract_state_features(data: mjx.Data) -> jax.Array:
     return jnp.concatenate([data.qpos, data.qvel])
 
 
+def collect_rollouts(
+    model: mjx.Model,
+    num_rollouts: int,
+    rollout_length: int,
+    action_min: jax.Array,
+    action_max: jax.Array,
+    rng: jax.Array,
+    controller: Optional[Controller] = None,
+    initial_state_sampler: Optional[Callable] = None,
+) -> Tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
+    """Collect rollouts using either random actions or a controller.
+
+    This function uses vmap to parallelize across rollouts and scan to
+    handle sequential steps, resulting in massive speedups on GPU.
+
+    Args:
+        model: MJX model.
+        num_rollouts: Number of rollouts to collect.
+        rollout_length: Length of each rollout.
+        action_min: Minimum action values (used for random actions).
+        action_max: Maximum action values (used for random actions).
+        rng: Random number generator key.
+        controller: Optional controller for controlled rollouts. If None, uses
+            random actions.
+        initial_state_sampler: Optional function to sample initial states.
+
+    Returns:
+        Tuple of (states, actions, next_states, accelerations).
+    """
+    if controller is None:
+        # Random rollouts: pre-generate all actions
+        def single_rollout(rng_key):
+            """Execute a single rollout with pre-generated random actions."""
+            init_rng, action_rng = jax.random.split(rng_key)
+
+            # Initialize state
+            if initial_state_sampler is not None:
+                initial_state = initial_state_sampler(model, init_rng)
+            else:
+                initial_state = mjx.make_data(model)
+                initial_state = mjx.forward(model, initial_state)
+
+            # Pre-generate all random actions for this rollout
+            actions = jax.random.uniform(
+                action_rng,
+                (rollout_length, model.nu),
+                minval=action_min,
+                maxval=action_max,
+            )
+
+            def step_fn(state, action):
+                """Single simulation step."""
+                current_state = extract_state_features(state)
+                current_accel = state.qacc
+
+                state = state.replace(ctrl=action)
+                next_state = mjx.step(model, state)
+                next_state_features = extract_state_features(next_state)
+
+                return next_state, (
+                    current_state,
+                    action,
+                    next_state_features,
+                    current_accel,
+                )
+
+            _, transitions = jax.lax.scan(step_fn, initial_state, actions)
+            return transitions
+
+        jit_single_rollout = jax.jit(single_rollout)
+        rng_keys = jax.random.split(rng, num_rollouts)
+        all_transitions = jax.vmap(jit_single_rollout)(rng_keys)
+
+    else:
+        # Controlled rollouts: controller generates actions on-the-fly
+        def single_rollout(rng_key):
+            """Execute a single rollout with controller."""
+            init_rng, ctrl_rng = jax.random.split(rng_key)
+
+            # Initialize state
+            if initial_state_sampler is not None:
+                initial_state = initial_state_sampler(model, init_rng)
+            else:
+                initial_state = mjx.make_data(model)
+                initial_state = mjx.forward(model, initial_state)
+
+            # Initialize controller state
+            controller_state = controller.init_state(ctrl_rng)
+
+            def step_fn(carry, _unused):
+                """Single simulation step with controller."""
+                state, ctrl_state = carry
+                current_state = extract_state_features(state)
+                current_accel = state.qacc
+
+                # Get action from controller (returns action and new state)
+                action, new_ctrl_state = controller.get_action(
+                    state, ctrl_state
+                )
+
+                # Step simulation
+                state = state.replace(ctrl=action)
+                next_state = mjx.step(model, state)
+                next_state_features = extract_state_features(next_state)
+
+                return (next_state, new_ctrl_state), (
+                    current_state,
+                    action,
+                    next_state_features,
+                    current_accel,
+                )
+
+            _, transitions = jax.lax.scan(
+                step_fn,
+                (initial_state, controller_state),
+                jnp.arange(rollout_length),
+            )
+            return transitions
+
+        jit_single_rollout = jax.jit(single_rollout)
+        rng_keys = jax.random.split(rng, num_rollouts)
+        all_transitions = jax.vmap(jit_single_rollout)(rng_keys)
+
+    # Unpack and reshape: (num_rollouts, rollout_length, ...) -> (N, ...)
+    states = all_transitions[0].reshape(-1, model.nq + model.nv)
+    actions = all_transitions[1].reshape(-1, model.nu)
+    next_states = all_transitions[2].reshape(-1, model.nq + model.nv)
+    accelerations = all_transitions[3].reshape(-1, model.nv)
+
+    return states, actions, next_states, accelerations
+
+
 def collect_random_rollouts(
     model: mjx.Model,
     num_rollouts: int,
@@ -65,8 +199,7 @@ def collect_random_rollouts(
 ) -> Tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
     """Collect rollouts with random actions using JAX parallelization.
 
-    This function uses vmap to parallelize across rollouts and scan to
-    handle sequential steps, resulting in massive speedups on GPU.
+    This is a convenience wrapper around collect_rollouts with controller=None.
 
     Args:
         model: MJX model.
@@ -80,67 +213,16 @@ def collect_random_rollouts(
     Returns:
         Tuple of (states, actions, next_states, accelerations).
     """
-
-    def single_rollout(rng_key):
-        """Execute a single rollout with pre-generated actions."""
-        # Split RNG for initialization and actions
-        init_rng, action_rng = jax.random.split(rng_key)
-
-        # Initialize state
-        if initial_state_sampler is not None:
-            initial_state = initial_state_sampler(model, init_rng)
-        else:
-            initial_state = mjx.make_data(model)
-            initial_state = mjx.forward(model, initial_state)
-
-        # Pre-generate all random actions for this rollout
-        actions = jax.random.uniform(
-            action_rng,
-            (rollout_length, model.nu),
-            minval=action_min,
-            maxval=action_max,
-        )
-
-        def step_fn(state, action):
-            """Single simulation step."""
-            # Extract current state features and acceleration
-            current_state = extract_state_features(state)
-            current_accel = state.qacc
-
-            # Step simulation
-            state = state.replace(ctrl=action)
-            next_state = mjx.step(model, state)
-            next_state_features = extract_state_features(next_state)
-
-            # Return next state and transition data
-            return next_state, (
-                current_state,
-                action,
-                next_state_features,
-                current_accel,
-            )
-
-        # Use scan to efficiently process sequential steps
-        _, transitions = jax.lax.scan(step_fn, initial_state, actions)
-
-        return transitions
-
-    # JIT compile the single rollout function
-    jit_single_rollout = jax.jit(single_rollout)
-
-    # Generate RNG keys for all rollouts
-    rng_keys = jax.random.split(rng, num_rollouts)
-
-    # Vectorize across rollouts for parallel execution
-    all_transitions = jax.vmap(jit_single_rollout)(rng_keys)
-
-    # Unpack and reshape: (num_rollouts, rollout_length, ...) -> (N, ...)
-    states = all_transitions[0].reshape(-1, model.nq + model.nv)
-    actions = all_transitions[1].reshape(-1, model.nu)
-    next_states = all_transitions[2].reshape(-1, model.nq + model.nv)
-    accelerations = all_transitions[3].reshape(-1, model.nv)
-
-    return states, actions, next_states, accelerations
+    return collect_rollouts(  # noqa: E501
+        model=model,
+        num_rollouts=num_rollouts,
+        rollout_length=rollout_length,
+        action_min=action_min,
+        action_max=action_max,
+        rng=rng,
+        controller=None,
+        initial_state_sampler=initial_state_sampler,
+    )
 
 
 def create_dataset(
@@ -239,7 +321,7 @@ def save_dataset(dataset: DynamicsDataset, path: str | Path) -> None:
 
     Args:
         dataset: Dataset to save.
-        path: Path to save the dataset (will use .pkl extension if not provided).
+        path: Path to save the dataset (uses .pkl extension if not provided).
     """
     path = Path(path)
     if not path.suffix:
@@ -305,22 +387,30 @@ def collect_and_prepare_data(
     rng: Optional[jax.Array] = None,
     dataset_path: Optional[str | Path] = None,
     force_recollect: bool = False,
+    controller: Optional[Controller] = None,
+    num_controlled_rollouts: int = 0,
 ) -> Tuple[DynamicsDataset, DynamicsDataset]:
     """Collect rollouts and prepare train/val datasets.
 
-    Optionally saves/loads datasets from disk to avoid re-collection.
+    Supports mixing random and controlled rollouts. Optionally saves/loads
+    datasets from disk to avoid re-collection.
 
     Args:
         env: Environment instance (provides model, action bounds, reset).
-        num_rollouts: Number of rollouts to collect.
+        num_rollouts: Total number of rollouts to collect.
         rollout_length: Length of each rollout.
         action_min: Minimum action values (defaults to env.action_min).
         action_max: Maximum action values (defaults to env.action_max).
         train_ratio: Fraction of data for training.
         rng: Random number generator key.
-        dataset_path: Optional path to save/load dataset. If provided and file exists,
-            loads from disk instead of collecting. Use .pkl extension or omit.
+        dataset_path: Optional path to save/load dataset. If provided and
+            file exists, loads from disk instead of collecting.
+            Use .pkl extension or omit.
         force_recollect: If True, recollect data even if dataset_path exists.
+        controller: Optional controller for controlled rollouts.
+        num_controlled_rollouts: Number of controlled rollouts to collect.
+            Remaining rollouts will be random. If controller is None and
+            num_controlled_rollouts > 0, raises ValueError.
 
     Returns:
         Tuple of (train_dataset, val_dataset).
@@ -345,6 +435,17 @@ def collect_and_prepare_data(
             print(f"Loaded dataset: {len(full_dataset)} samples")
             return train_dataset, val_dataset
 
+    # Validate controller arguments
+    num_random_rollouts = num_rollouts - num_controlled_rollouts
+    if num_controlled_rollouts > 0 and controller is None:
+        raise ValueError(
+            "controller must be provided when num_controlled_rollouts > 0"
+        )
+    if num_random_rollouts < 0:
+        raise ValueError(
+            "num_controlled_rollouts cannot exceed num_rollouts"
+        )
+
     # Collect new data
     if rng is None:
         rng = jax.random.PRNGKey(0)
@@ -361,15 +462,71 @@ def collect_and_prepare_data(
         data = env.reset(data, r)
         return mjx.forward(m, data)
 
-    print(f"Collecting {num_rollouts} rollouts of length {rollout_length}...")
-    states, actions, next_states, accelerations = collect_random_rollouts(
-        model=model,
-        num_rollouts=num_rollouts,
-        rollout_length=rollout_length,
-        action_min=action_min,
-        action_max=action_max,
-        rng=rng,
-        initial_state_sampler=initial_state_sampler,
+    # Collect random rollouts
+    all_states = []
+    all_actions = []
+    all_next_states = []
+    all_accelerations = []
+
+    if num_random_rollouts > 0:
+        print(
+            f"Collecting {num_random_rollouts} random rollouts of length "
+            f"{rollout_length}..."
+        )
+        rng, subrng = jax.random.split(rng)
+        states, actions, next_states, accelerations = collect_rollouts(
+            model=model,
+            num_rollouts=num_random_rollouts,
+            rollout_length=rollout_length,
+            action_min=action_min,
+            action_max=action_max,
+            rng=subrng,
+            controller=None,
+            initial_state_sampler=initial_state_sampler,
+        )
+        all_states.append(states)
+        all_actions.append(actions)
+        all_next_states.append(next_states)
+        all_accelerations.append(accelerations)
+
+    # Collect controlled rollouts
+    if num_controlled_rollouts > 0:
+        print(
+            f"Collecting {num_controlled_rollouts} controlled rollouts "
+            f"of length {rollout_length}..."
+        )
+        rng, subrng = jax.random.split(rng)
+        states, actions, next_states, accelerations = collect_rollouts(
+            model=model,
+            num_rollouts=num_controlled_rollouts,
+            rollout_length=rollout_length,
+            action_min=action_min,
+            action_max=action_max,
+            rng=subrng,
+            controller=controller,
+            initial_state_sampler=initial_state_sampler,
+        )
+        all_states.append(states)
+        all_actions.append(actions)
+        all_next_states.append(next_states)
+        all_accelerations.append(accelerations)
+
+    # Concatenate all rollouts
+    states = (
+        jnp.concatenate(all_states, axis=0) if all_states else jnp.array([])
+    )
+    actions = (
+        jnp.concatenate(all_actions, axis=0) if all_actions else jnp.array([])
+    )
+    next_states = (
+        jnp.concatenate(all_next_states, axis=0)
+        if all_next_states
+        else jnp.array([])
+    )
+    accelerations = (
+        jnp.concatenate(all_accelerations, axis=0)
+        if all_accelerations
+        else jnp.array([])
     )
 
     dataset = create_dataset(

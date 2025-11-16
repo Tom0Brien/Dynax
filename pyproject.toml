@@ -23,6 +23,7 @@ dependencies = [
     "tensorboard>=2.18.0",
     "matplotlib>=3.9.0",
     "moviepy>=1.0.3",
+    "hydrax",
 ]
 
 [project.optional-dependencies]
@@ -60,3 +61,6 @@ docstring-code-line-length = "dynamic"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.uv.sources]
+hydrax = { path = "../hydrax", editable = true }

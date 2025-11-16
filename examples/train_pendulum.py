@@ -1,11 +1,25 @@
 """Train a neural dynamics model for pendulum."""
 
 import jax
+from hydrax.algs import PredictiveSampling
+from hydrax.tasks.pendulum import Pendulum as HydraxPendulumTask
 
 from dynax import TrainingConfig, train_dynamics_model
 from dynax.architectures import ResNetDynamicsModel
 from dynax.envs import PendulumEnv
-from dynax.utils import collect_and_prepare_data
+from dynax.utils import HydraxController, collect_and_prepare_data
+
+# Create hydrax task and controller
+hydrax_task = HydraxPendulumTask()
+hydrax_controller = PredictiveSampling(
+    hydrax_task,
+    num_samples=32,
+    noise_level=0.1,
+    plan_horizon=1.0,
+    spline_type="zero",
+    num_knots=11,
+)
+controller = HydraxController(hydrax_controller)
 
 # Create environment and collect data
 env = PendulumEnv()
@@ -15,7 +29,9 @@ train_dataset, val_dataset = collect_and_prepare_data(
     num_rollouts=50,
     rollout_length=100,
     rng=rng,
-    dataset_path="data/pendulum_dataset.pkl",  # Save/load dataset
+    dataset_path="data/pendulum_dataset.pkl",
+    controller=controller,
+    num_controlled_rollouts=20,  # 20 controlled + 30 random
 )
 
 # Train model
@@ -32,7 +48,7 @@ trained_params = train_dynamics_model(
     train_dataset=train_dataset,
     val_dataset=val_dataset,
     config=TrainingConfig(
-        num_epochs=500,
+        num_epochs=200,
         batch_size=512,
         learning_rate=1e-3,
         noise_std=0.01,
