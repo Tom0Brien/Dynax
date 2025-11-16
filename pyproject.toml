@@ -1,0 +1,59 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "dynax"
+version = "0.1.0"
+description = "Training neural network models for robotic systems with MuJoCo MJX"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.12"
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Programming Language :: Python",
+]
+dependencies = [
+    "jax[cuda12]>=0.4.35",
+    "flax>=0.10.0",
+    "optax>=0.2.0",
+    "mujoco>=3.2.4",
+    "mujoco-mjx>=3.2.4",
+]
+
+[project.optional-dependencies]
+dev = [
+    "matplotlib>=3.9.0",
+    "pytest>=8.0.0",
+    "ruff>=0.7.0",
+]
+
+[tool.ruff]
+line-length = 80
+
+[tool.ruff.lint]
+pydocstyle.convention = "google"
+select = [
+    "E",  # pycodestyle errors
+    "F",  # Pyflakes rules
+    "I",  # isort formatting
+]
+ignore = [
+    "E731",  # assigning to a `lambda` expression
+]
+
+[tool.ruff.lint.isort]
+combine-as-imports = true
+known-first-party = ["dynax"]
+split-on-trailing-comma = false
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+line-ending = "auto"
+docstring-code-format = true
+docstring-code-line-length = "dynamic"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
