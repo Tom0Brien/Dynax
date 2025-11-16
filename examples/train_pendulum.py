@@ -3,7 +3,7 @@
 import jax
 
 from dynax import TrainingConfig, train_dynamics_model
-from dynax.architectures import MLPDynamicsModel
+from dynax.architectures import ResNetDynamicsModel
 from dynax.envs import PendulumEnv
 from dynax.utils import collect_and_prepare_data
 
@@ -19,10 +19,10 @@ train_dataset, val_dataset = collect_and_prepare_data(
 )
 
 # Train model
-dynamics_model = MLPDynamicsModel(
-    state_dim=train_dataset.state_dim,
-    action_dim=train_dataset.action_dim,
-    hidden_dims=(500, 500),
+dynamics_model = ResNetDynamicsModel(
+    env=env,
+    hidden_dim=500,
+    num_blocks=2,
     activation="relu",
 )
 
@@ -32,7 +32,7 @@ trained_params = train_dynamics_model(
     train_dataset=train_dataset,
     val_dataset=val_dataset,
     config=TrainingConfig(
-        num_epochs=200,
+        num_epochs=500,
         batch_size=512,
         learning_rate=1e-3,
         noise_std=0.01,

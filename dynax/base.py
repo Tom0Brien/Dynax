@@ -1,12 +1,12 @@
 """Base classes for neural dynamics models."""
 
 from abc import abstractmethod
-from typing import Tuple
 
 import jax
-import jax.numpy as jnp
 from flax import linen as nn
 from flax.struct import dataclass
+
+from dynax.envs import Env
 
 
 @dataclass
@@ -21,7 +21,6 @@ class DynamicsModelParams:
         action_std: Std deviation of actions for normalization.
         output_mean: Mean of model outputs (accelerations).
         output_std: Std deviation of model outputs.
-        dt: Timestep for integration.
     """
 
     network_params: dict
@@ -31,14 +30,31 @@ class DynamicsModelParams:
     action_std: jax.Array
     output_mean: jax.Array
     output_std: jax.Array
-    dt: float = 0.02
 
 
 class BaseDynamicsModel(nn.Module):
-    """Abstract base class for neural dynamics models."""
+    """Abstract base class for neural dynamics models.
 
-    state_dim: int
-    action_dim: int
+    Attributes:
+        env: Environment providing model dimensions and timestep.
+    """
+
+    env: Env
+
+    @property
+    def state_dim(self) -> int:
+        """State dimension: nq + nv."""
+        return self.env.model.nq + self.env.model.nv
+
+    @property
+    def action_dim(self) -> int:
+        """Action dimension: nu (number of actuators)."""
+        return self.env.model.nu
+
+    @property
+    def dt(self) -> float:
+        """Timestep from environment."""
+        return self.env.dt
 
     @abstractmethod
     def __call__(self, state: jax.Array, action: jax.Array) -> jax.Array:
@@ -52,7 +68,7 @@ class BaseDynamicsModel(nn.Module):
         Default: state deltas (next_state - state).
 
         Args:
-            dataset: DynamicsDataset containing states, actions, next_states, etc.
+            dataset: DynamicsDataset with states, actions, next_states, etc.
 
         Returns:
             Training targets with shape (N, output_dim).

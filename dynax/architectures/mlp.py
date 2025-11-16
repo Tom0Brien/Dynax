@@ -20,14 +20,11 @@ class MLPDynamicsModel(BaseDynamicsModel):
     The model predicts Δs = f(s, a), and next_state = s + Δs.
 
     Attributes:
-        state_dim: Total state dimension (nq + nv).
-        action_dim: Action dimension.
+        env: Environment providing model dimensions.
         hidden_dims: Hidden layer dimensions (default: (500, 500) from paper).
         activation: Activation function name ("relu", "swish", or "tanh").
     """
 
-    state_dim: int
-    action_dim: int
     hidden_dims: Tuple[int, ...] = (500, 500)
     activation: str = "relu"
 
@@ -61,6 +58,6 @@ class MLPDynamicsModel(BaseDynamicsModel):
             x = act_fn(x)
 
         # Output layer predicts state delta
-        delta = nn.Dense(self.state_dim, name="output")(x)
+        delta = nn.Dense(self.env.model.nq + self.env.model.nv, name="output")(x)
 
         return delta

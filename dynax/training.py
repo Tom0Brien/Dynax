@@ -627,7 +627,6 @@ def train_dynamics_model(
         action_std=action_std,
         output_mean=output_mean,
         output_std=output_std,
-        dt=train_dataset.dt,
     )
 
     # Evaluation
