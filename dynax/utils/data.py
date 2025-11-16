@@ -230,3 +230,68 @@ def split_dataset(
 
     return train_dataset, val_dataset
 
+
+def collect_and_prepare_data(
+    env,
+    num_rollouts: int = 50,
+    rollout_length: int = 100,
+    action_min: Optional[jax.Array] = None,
+    action_max: Optional[jax.Array] = None,
+    train_ratio: float = 0.8,
+    rng: Optional[jax.Array] = None,
+) -> Tuple[DynamicsDataset, DynamicsDataset]:
+    """Collect rollouts and prepare train/val datasets.
+
+    Args:
+        env: Environment instance (provides model, action bounds, reset).
+        num_rollouts: Number of rollouts to collect.
+        rollout_length: Length of each rollout.
+        action_min: Minimum action values (defaults to env.action_min).
+        action_max: Maximum action values (defaults to env.action_max).
+        train_ratio: Fraction of data for training.
+        rng: Random number generator key.
+
+    Returns:
+        Tuple of (train_dataset, val_dataset).
+    """
+    if rng is None:
+        rng = jax.random.PRNGKey(0)
+
+    model = env.model
+    if action_min is None:
+        action_min = env.action_min
+    if action_max is None:
+        action_max = env.action_max
+
+    # Use env's reset method
+    def initial_state_sampler(m, r):
+        data = mjx.make_data(m)
+        data = env.reset(data, r)
+        return mjx.forward(m, data)
+
+    states, actions, next_states, accelerations = collect_random_rollouts(
+        model=model,
+        num_rollouts=num_rollouts,
+        rollout_length=rollout_length,
+        action_min=action_min,
+        action_max=action_max,
+        rng=rng,
+        initial_state_sampler=initial_state_sampler,
+    )
+
+    dataset = create_dataset(
+        model=model,
+        states=states,
+        actions=actions,
+        next_states=next_states,
+        accelerations=accelerations,
+        dt=env.dt,
+    )
+
+    rng, split_rng = jax.random.split(rng)
+    train_dataset, val_dataset = split_dataset(
+        dataset, train_ratio=train_ratio, rng=split_rng
+    )
+
+    return train_dataset, val_dataset
+

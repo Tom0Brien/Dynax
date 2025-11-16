@@ -23,18 +23,23 @@ class TrainingConfig:
     """Configuration for dynamics model training.
 
     Attributes:
-        learning_rate: Learning rate for optimizer.
-        batch_size: Batch size for training.
+        learning_rate: Learning rate for optimizer (paper: 0.001).
+        batch_size: Batch size for training (paper: 512).
         num_epochs: Number of training epochs.
         weight_decay: L2 regularization weight.
         grad_clip: Maximum gradient norm (None for no clipping).
+        noise_std: Std dev of Gaussian noise for input/output augmentation.
+        loss_fn: Optional custom loss function with signature
+            (params, states, actions, targets) -> (loss, metrics).
     """
 
     learning_rate: float = 1e-3
-    batch_size: int = 256
+    batch_size: int = 512
     num_epochs: int = 100
     weight_decay: float = 1e-4
     grad_clip: float = None
+    noise_std: float = 0.01
+    loss_fn: Callable = None
 
 
 @dataclass
@@ -63,16 +68,37 @@ def create_loss_fn(
     output_mean: jax.Array,
     output_std: jax.Array,
     weight_decay: float = 0.0,
+    noise_std: float = 0.0,
 ) -> Callable:
-    """Create a loss function for training the dynamics model."""
+    """Create a loss function for training the dynamics model.
+
+    Args:
+        model: Dynamics model.
+        state_mean: State normalization mean.
+        state_std: State normalization std.
+        action_mean: Action normalization mean.
+        action_std: Action normalization std.
+        output_mean: Output normalization mean.
+        output_std: Output normalization std.
+        weight_decay: L2 regularization weight.
+        noise_std: Gaussian noise std for data augmentation.
+    """
 
     def loss_fn(
         params: dict,
         states: jax.Array,
         actions: jax.Array,
         targets: jax.Array,
+        rng: jax.Array = None,
     ) -> Tuple[jax.Array, dict]:
         """Compute MSE loss between predicted and actual outputs."""
+        # Add Gaussian noise for robustness (if noise_std > 0)
+        if noise_std > 0 and rng is not None:
+            rng_state, rng_action, rng_target = jax.random.split(rng, 3)
+            states = states + jax.random.normal(rng_state, states.shape) * noise_std
+            actions = actions + jax.random.normal(rng_action, actions.shape) * noise_std
+            targets = targets + jax.random.normal(rng_target, targets.shape) * noise_std
+
         # Normalize states, actions, and targets
         states_norm = jax.vmap(normalize_state, in_axes=(0, None, None))(
             states, state_mean, state_std
@@ -156,25 +182,30 @@ def train_step(
 
 def prepare_epoch_batches(
     dataset,
+    targets: jax.Array,
     batch_size: int,
     rng: jax.Array,
-) -> Tuple[jax.Array, jax.Array, jax.Array]:
+) -> Tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
     """Prepare all batches for an epoch by pre-shuffling.
 
     Args:
         dataset: The dynamics dataset.
+        targets: Training targets (state deltas or accelerations).
         batch_size: Size of each batch.
         rng: Random number generator key.
 
     Returns:
-        Tuple of (states_batches, actions_batches, targets_batches) where
+        Tuple of (states_batches, actions_batches, targets_batches, rngs_batches) where
         each has shape (num_batches, batch_size, ...).
     """
     num_samples = len(dataset)
     num_batches = (num_samples + batch_size - 1) // batch_size
 
+    # Split RNG for shuffling and noise
+    shuffle_rng, noise_rng = jax.random.split(rng)
+
     # Shuffle indices once for the entire epoch
-    indices = jax.random.permutation(rng, num_samples)
+    indices = jax.random.permutation(shuffle_rng, num_samples)
 
     # Pad dataset to be divisible by batch_size
     remainder = num_samples % batch_size
@@ -189,9 +220,12 @@ def prepare_epoch_batches(
     # Use advanced indexing to get all batches at once
     states_batches = dataset.states[indices_reshaped]
     actions_batches = dataset.actions[indices_reshaped]
-    targets_batches = dataset.accelerations[indices_reshaped]
+    targets_batches = targets[indices_reshaped]
 
-    return states_batches, actions_batches, targets_batches
+    # Generate RNG keys for each batch (for noise augmentation)
+    rngs_batches = jax.random.split(noise_rng, num_batches)
+
+    return states_batches, actions_batches, targets_batches, rngs_batches
 
 
 def create_epoch_train_fn(
@@ -212,14 +246,14 @@ def create_epoch_train_fn(
 
     def train_step_inner(
         state: TrainingState,
-        batch: Tuple[jax.Array, jax.Array, jax.Array],
+        batch: Tuple[jax.Array, jax.Array, jax.Array, jax.Array],
     ) -> Tuple[TrainingState, dict]:
         """Single training step."""
-        states, actions, targets = batch
+        states, actions, targets, rng = batch
 
         # Compute loss and gradients
         (loss, metrics), grads = jax.value_and_grad(loss_fn, has_aux=True)(
-            state.params, states, actions, targets
+            state.params, states, actions, targets, rng
         )
 
         # Optionally clip gradients
@@ -239,16 +273,16 @@ def create_epoch_train_fn(
 
     def epoch_train_fn(
         state: TrainingState,
-        batches: Tuple[jax.Array, jax.Array, jax.Array],
+        batches: Tuple[jax.Array, jax.Array, jax.Array, jax.Array],
     ) -> Tuple[TrainingState, dict]:
         """Train for one epoch using scan."""
-        states_batch, actions_batch, targets_batch = batches
+        states_batch, actions_batch, targets_batch, rngs_batch = batches
 
         def scan_fn(state, batch_data):
             """Scan function for processing batches."""
-            states, actions, targets = batch_data
+            states, actions, targets, rng = batch_data
             new_state, metrics = train_step_inner(
-                state, (states, actions, targets)
+                state, (states, actions, targets, rng)
             )
             return new_state, metrics
 
@@ -256,7 +290,7 @@ def create_epoch_train_fn(
         final_state, metrics_list = jax.lax.scan(
             scan_fn,
             state,
-            (states_batch, actions_batch, targets_batch),
+            (states_batch, actions_batch, targets_batch, rngs_batch),
         )
 
         # Average metrics across batches
@@ -268,6 +302,106 @@ def create_epoch_train_fn(
     return jax.jit(epoch_train_fn, donate_argnums=(0,))
 
 
+def _print_evaluation_summary(
+    model: BaseDynamicsModel,
+    params: DynamicsModelParams,
+    val_dataset: DynamicsDataset,
+    env,
+    eval_num_samples: int,
+    eval_rollout_length: int,
+    eval_num_rollouts: int,
+    rng: jax.Array,
+):
+    """Print evaluation summary after training."""
+    from dynax.evaluation import (
+        create_rollout_fn,
+        create_true_rollout_fn,
+        evaluate_rollout,
+        evaluate_single_step_dataset,
+    )
+    from mujoco import mjx
+
+    print("\n" + "=" * 60)
+    print("EVALUATION SUMMARY")
+    print("=" * 60)
+
+    # Single-step evaluation
+    print("\nSingle-Step Prediction:")
+    single_step_results = evaluate_single_step_dataset(
+        model, params, val_dataset, num_samples=eval_num_samples, rng=rng
+    )
+    print(f"  MAE:  {single_step_results['mae_mean']:.6f}")
+    print(f"  RMSE: {single_step_results['rmse_mean']:.6f}")
+
+    # Multi-step rollout evaluation (if env provided)
+    if env is not None:
+        from dynax.evaluation import evaluate_rollouts_batch
+
+        print("\nMulti-Step Rollout:")
+        neural_rollout = create_rollout_fn(model, params)
+
+        # Pre-generate all initial states and actions in batch
+        rng, reset_rng = jax.random.split(rng)
+        reset_rngs = jax.random.split(reset_rng, eval_num_rollouts)
+
+        # Vectorized reset function
+        def reset_single(r):
+            data = mjx.make_data(env.model)
+            data = env.reset(data, r)
+            data = mjx.forward(env.model, data)
+            return jnp.concatenate([data.qpos, data.qvel])
+
+        initial_states = jax.vmap(reset_single)(reset_rngs)
+
+        # Pre-generate all random actions
+        rng, action_rng = jax.random.split(rng)
+        actions_batch = jax.random.uniform(
+            action_rng,
+            (eval_num_rollouts, eval_rollout_length, env.model.nu),
+            minval=env.action_min,
+            maxval=env.action_max,
+        )
+
+        # Evaluate all rollouts in parallel
+        rollout_results = evaluate_rollouts_batch(
+            env.model, neural_rollout, initial_states, actions_batch
+        )
+
+        # Compute std dev for reporting
+        def compute_std():
+            # Re-run to get individual results for std
+            def single_eval(init_state, actions):
+                pred = neural_rollout(init_state, actions)
+                return pred[-1]  # Final state
+
+            pred_final_states = jax.vmap(single_eval)(initial_states, actions_batch)
+
+            def true_final(init_state, actions):
+                data = mjx.make_data(env.model)
+                nq = env.model.nq
+                data = data.replace(qpos=init_state[:nq], qvel=init_state[nq:])
+                data = mjx.forward(env.model, data)
+
+                def step(d, a):
+                    d = d.replace(ctrl=a)
+                    return mjx.step(env.model, d), None
+
+                final_data, _ = jax.lax.scan(step, data, actions)
+                return jnp.concatenate([final_data.qpos, final_data.qvel])
+
+            true_final_states = jax.vmap(true_final)(initial_states, actions_batch)
+            final_maes = jnp.mean(jnp.abs(pred_final_states - true_final_states), axis=1)
+            return jnp.std(final_maes)
+
+        std_final_mae = compute_std()
+
+        print(f"  Final MAE:  {rollout_results['final_mae']:.6f} ± {std_final_mae:.6f}")
+        print(f"  Final RMSE: {rollout_results['final_rmse']:.6f}")
+        print(f"  (averaged over {eval_num_rollouts} rollouts of length {eval_rollout_length})")
+
+    print("\n" + "=" * 60)
+
+
 def train_dynamics_model(
     model: BaseDynamicsModel,
     train_dataset: DynamicsDataset,
@@ -275,13 +409,35 @@ def train_dynamics_model(
     config: TrainingConfig,
     rng: jax.Array,
     verbose: bool = True,
+    env=None,
+    eval_num_samples: int = 1000,
+    eval_rollout_length: int = 100,
+    eval_num_rollouts: int = 50,
 ) -> DynamicsModelParams:
-    """Train a dynamics model on collected data."""
+    """Train a dynamics model on collected data.
+
+    Args:
+        model: Dynamics model to train.
+        train_dataset: Training dataset.
+        val_dataset: Validation dataset.
+        config: Training configuration.
+        rng: Random number generator key.
+        verbose: Whether to print training progress.
+        env: Optional environment for rollout evaluation.
+        eval_num_samples: Number of samples for single-step evaluation.
+        eval_rollout_length: Length of evaluation rollouts.
+        eval_num_rollouts: Number of evaluation rollouts.
+
+    Returns:
+        Trained model parameters.
+    """
+    # Let the model specify what it predicts
+    train_targets = model.prepare_training_targets(train_dataset)
+    val_targets = model.prepare_training_targets(val_dataset)
+
     # Compute normalization statistics
     state_mean, state_std, output_mean, output_std = (
-        compute_normalization_stats(
-            train_dataset.states, train_dataset.accelerations
-        )
+        compute_normalization_stats(train_dataset.states, train_targets)
     )
 
     # Compute action normalization statistics
@@ -299,17 +455,21 @@ def train_dynamics_model(
     optimizer = optax.adam(config.learning_rate)
     opt_state = optimizer.init(params)
 
-    # Create loss function
-    loss_fn = create_loss_fn(
-        model,
-        state_mean,
-        state_std,
-        action_mean,
-        action_std,
-        output_mean,
-        output_std,
-        config.weight_decay,
-    )
+    # Create loss function (use custom or default)
+    if config.loss_fn is not None:
+        loss_fn = config.loss_fn
+    else:
+        loss_fn = create_loss_fn(
+            model,
+            state_mean,
+            state_std,
+            action_mean,
+            action_std,
+            output_mean,
+            output_std,
+            config.weight_decay,
+            config.noise_std,
+        )
 
     # Initialize training state
     train_state = TrainingState(
@@ -324,15 +484,10 @@ def train_dynamics_model(
         loss_fn, optimizer, config.grad_clip
     )
 
-    # JIT-compiled validation function
+    # JIT-compiled validation function (no noise augmentation for validation)
     @jax.jit
     def validate(params):
-        _, metrics = loss_fn(
-            params,
-            val_dataset.states,
-            val_dataset.actions,
-            val_dataset.accelerations,
-        )
+        _, metrics = loss_fn(params, val_dataset.states, val_dataset.actions, val_targets, None)
         return metrics
 
     # Training loop
@@ -340,7 +495,7 @@ def train_dynamics_model(
         # Prepare all batches for this epoch (pre-shuffled)
         rng, epoch_rng = jax.random.split(rng)
         batches = prepare_epoch_batches(
-            train_dataset, config.batch_size, epoch_rng
+            train_dataset, train_targets, config.batch_size, epoch_rng
         )
 
         # Train entire epoch in one compiled call using scan
@@ -366,8 +521,8 @@ def train_dynamics_model(
 
         train_state = train_state.replace(epoch=epoch + 1)
 
-    # Return trained parameters with normalization stats
-    return DynamicsModelParams(
+    # Create final model parameters
+    trained_params = DynamicsModelParams(
         network_params=train_state.params,
         state_mean=state_mean,
         state_std=state_std,
@@ -377,4 +532,19 @@ def train_dynamics_model(
         output_std=output_std,
         dt=train_dataset.dt,
     )
+
+    # Evaluation
+    if verbose:
+        _print_evaluation_summary(
+            model,
+            trained_params,
+            val_dataset,
+            env,
+            eval_num_samples,
+            eval_rollout_length,
+            eval_num_rollouts,
+            rng,
+        )
+
+    return trained_params
 

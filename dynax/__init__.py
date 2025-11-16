@@ -16,10 +16,14 @@ jax.config.update("jax_compilation_cache_dir", "/tmp/jax_cache")
 
 # Import core functionality
 from dynax.base import BaseDynamicsModel, DynamicsModelParams
-from dynax.models import (
-    list_available_models,
-    load_mjx_model,
-    load_model,
+from dynax.envs.envs import Env, list_available_models
+from dynax.evaluation import (
+    create_rollout_fn,
+    create_true_rollout_fn,
+    evaluate_rollout,
+    evaluate_rollouts_batch,
+    evaluate_single_step,
+    evaluate_single_step_dataset,
 )
 from dynax.training import (
     TrainingConfig,
@@ -39,8 +43,13 @@ __all__ = [
     "train_dynamics_model",
     "create_epoch_train_fn",
     "prepare_epoch_batches",
-    "load_model",
-    "load_mjx_model",
+    "Env",
     "list_available_models",
+    "evaluate_single_step",
+    "evaluate_single_step_dataset",
+    "create_rollout_fn",
+    "create_true_rollout_fn",
+    "evaluate_rollout",
+    "evaluate_rollouts_batch",
 ]
 

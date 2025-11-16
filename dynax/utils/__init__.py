@@ -2,6 +2,7 @@
 
 from dynax.utils.data import (
     DynamicsDataset,
+    collect_and_prepare_data,
     collect_random_rollouts,
     create_dataset,
     extract_state_features,
@@ -17,6 +18,7 @@ from dynax.utils.normalization import (
 
 __all__ = [
     "DynamicsDataset",
+    "collect_and_prepare_data",
     "collect_random_rollouts",
     "create_dataset",
     "extract_state_features",

@@ -42,8 +42,22 @@ class BaseDynamicsModel(nn.Module):
 
     @abstractmethod
     def __call__(self, state: jax.Array, action: jax.Array) -> jax.Array:
-        """Predict the state change given current state and action."""
+        """Predict the model output given current state and action."""
         pass
+
+    def prepare_training_targets(self, dataset) -> jax.Array:
+        """Prepare training targets from a dataset.
+
+        Override this method to specify what your model predicts.
+        Default: state deltas (next_state - state).
+
+        Args:
+            dataset: DynamicsDataset containing states, actions, next_states, etc.
+
+        Returns:
+            Training targets with shape (N, output_dim).
+        """
+        return dataset.next_states - dataset.states
 
     def step(
         self,
