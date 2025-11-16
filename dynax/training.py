@@ -36,6 +36,7 @@ class TrainingConfig:
         loss_fn: Optional custom loss function with signature
             (params, states, actions, targets) -> (loss, metrics).
         log_dir: Optional directory for TensorBoard logging. If None, no logging.
+        render_videos: Whether to render videos (slow, disabled by default).
     """
 
     learning_rate: float = 1e-3
@@ -46,6 +47,7 @@ class TrainingConfig:
     noise_std: float = 0.01
     loss_fn: Callable = None
     log_dir: Optional[str | Path] = None
+    render_videos: bool = False
 
 
 @dataclass
@@ -318,12 +320,11 @@ def _print_evaluation_summary(
     eval_num_rollouts: int,
     rng: jax.Array,
     tb_writer: Optional[SummaryWriter] = None,
+    config: Optional[TrainingConfig] = None,
 ):
     """Print evaluation summary after training."""
     from dynax.evaluation import (
         create_rollout_fn,
-        create_true_rollout_fn,
-        evaluate_rollout,
         evaluate_single_step_dataset,
     )
     from mujoco import mjx
@@ -374,7 +375,7 @@ def _print_evaluation_summary(
             maxval=env.action_max,
         )
 
-        # Evaluate all rollouts in parallel (with trajectories for plotting)
+        # Evaluate all rollouts in parallel (with trajectories for metrics)
         rollout_results = evaluate_rollouts_batch(
             env.model,
             neural_rollout,
@@ -383,33 +384,11 @@ def _print_evaluation_summary(
             return_trajectories=True,
         )
 
-        # Compute std dev for reporting
-        def compute_std():
-            # Re-run to get individual results for std
-            def single_eval(init_state, actions):
-                pred = neural_rollout(init_state, actions)
-                return pred[-1]  # Final state
-
-            pred_final_states = jax.vmap(single_eval)(initial_states, actions_batch)
-
-            def true_final(init_state, actions):
-                data = mjx.make_data(env.model)
-                nq = env.model.nq
-                data = data.replace(qpos=init_state[:nq], qvel=init_state[nq:])
-                data = mjx.forward(env.model, data)
-
-                def step(d, a):
-                    d = d.replace(ctrl=a)
-                    return mjx.step(env.model, d), None
-
-                final_data, _ = jax.lax.scan(step, data, actions)
-                return jnp.concatenate([final_data.qpos, final_data.qvel])
-
-            true_final_states = jax.vmap(true_final)(initial_states, actions_batch)
-            final_maes = jnp.mean(jnp.abs(pred_final_states - true_final_states), axis=1)
-            return jnp.std(final_maes)
-
-        std_final_mae = compute_std()
+        # Compute std dev directly from trajectories (no re-computation!)
+        true_trajs = rollout_results["true_trajectories"]
+        pred_trajs = rollout_results["pred_trajectories"]
+        final_errors = jnp.mean(jnp.abs(pred_trajs[:, -1, :] - true_trajs[:, -1, :]), axis=1)
+        std_final_mae = float(jnp.std(final_errors))
 
         print(f"  Final MAE:  {rollout_results['final_mae']:.6f} ± {std_final_mae:.6f}")
         print(f"  Final RMSE: {rollout_results['final_rmse']:.6f}")
@@ -422,26 +401,28 @@ def _print_evaluation_summary(
             tb_writer.add_scalar("eval/rollout_final_mae", float(rollout_results["final_mae"]), 0)
             tb_writer.add_scalar("eval/rollout_final_mae_std", float(std_final_mae), 0)
             tb_writer.add_scalar("eval/rollout_final_rmse", float(rollout_results["final_rmse"]), 0)
-            # Log error over time
+            # Log error over time (sample every 10th step to avoid too many files)
             mae_over_time = rollout_results["mae_over_time"]
             rmse_over_time = rollout_results["rmse_over_time"]
-            for t, (mae_t, rmse_t) in enumerate(zip(mae_over_time, rmse_over_time)):
-                tb_writer.add_scalar("eval/rollout_mae_over_time", float(mae_t), t)
-                tb_writer.add_scalar("eval/rollout_rmse_over_time", float(rmse_t), t)
+            # Log sampled points (every 10th step) to avoid creating too many files
+            sample_every = max(1, len(mae_over_time) // 20)  # ~20 points max
+            for t in range(0, len(mae_over_time), sample_every):
+                tb_writer.add_scalar("eval/rollout_mae_over_time", float(mae_over_time[t]), t)
+                tb_writer.add_scalar("eval/rollout_rmse_over_time", float(rmse_over_time[t]), t)
 
-            # Create and log trajectory plots
+            # Create and log trajectory plots (optimized for speed)
             true_trajs = rollout_results["true_trajectories"]
             pred_trajs = rollout_results["pred_trajectories"]
             state_dim = true_trajs.shape[-1]
             nq = env.model.nq
 
-            # Create trajectory plots
+            # Create trajectory plots (reduced for speed)
             plot_array = plot_trajectories(
                 true_trajs,
                 pred_trajs,
                 state_dim=state_dim,
                 nq=nq,
-                num_plots=5,
+                num_plots=2,  # Reduced for speed
                 save_path=Path(tb_writer.logdir) / "trajectory_plots.png",
             )
 
@@ -449,6 +430,36 @@ def _print_evaluation_summary(
             tb_writer.add_image(
                 "eval/trajectories", plot_array.transpose(2, 0, 1), 0, dataformats="CHW"
             )
+
+            # Optionally render videos (optimized but still CPU-bound)
+            if config is not None and config.render_videos:
+                from dynax.evaluation import render_trajectory_video
+
+                num_videos = min(1, len(true_trajs))  # Render only 1 video for speed
+
+                for vid_idx in range(num_videos):
+                    true_traj = true_trajs[vid_idx]
+                    pred_traj = pred_trajs[vid_idx]
+
+                    # Save video file (high quality)
+                    video_path = Path(tb_writer.logdir) / f"trajectory_video_{vid_idx}.mp4"
+                    video_frames = render_trajectory_video(
+                        env,
+                        true_traj,
+                        pred_traj,
+                        fps=30,  # Higher FPS for smoother playback
+                        save_path=video_path,
+                        max_frames=200,  # More frames for longer videos
+                    )
+
+                    # Also log to TensorBoard (convert HWC to CHW)
+                    video_chw = video_frames.transpose(0, 3, 1, 2)  # T, H, W, C -> T, C, H, W
+                    tb_writer.add_video(
+                        f"eval/trajectory_video_{vid_idx}",
+                        video_chw[None, :],  # Add batch dimension: (1, T, C, H, W)
+                        0,
+                        fps=30,  # Match video FPS
+                    )
 
     print("\n" + "=" * 60)
 
@@ -468,7 +479,7 @@ def train_dynamics_model(
     env=None,
     eval_num_samples: int = 1000,
     eval_rollout_length: int = 100,
-    eval_num_rollouts: int = 50,
+    eval_num_rollouts: int = 10,  # Reduced default for faster evaluation
 ) -> DynamicsModelParams:
     """Train a dynamics model on collected data.
 
@@ -621,7 +632,7 @@ def train_dynamics_model(
 
     # Evaluation
     if verbose:
-        eval_results = _print_evaluation_summary(
+        _print_evaluation_summary(
             model,
             trained_params,
             val_dataset,
@@ -631,6 +642,7 @@ def train_dynamics_model(
             eval_num_rollouts,
             rng,
             tb_writer,
+            config,
         )
 
     # Close TensorBoard writer

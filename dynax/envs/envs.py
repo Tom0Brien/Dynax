@@ -2,7 +2,6 @@
 
 from abc import abstractmethod
 from pathlib import Path
-from typing import Callable, Optional
 
 import jax
 import jax.numpy as jnp
@@ -26,7 +25,7 @@ class Env:
     def __init__(
         self,
         model_name: str,
-        use_scene: bool = False,
+        use_scene: bool = True,
     ):
         """Initialize the environment.
 
@@ -53,6 +52,16 @@ class Env:
         # Timestep
         self.dt = float(self.mj_model.opt.timestep)
 
+        # Initialize renderer for visualization with higher resolution
+        self.renderer = mujoco.Renderer(self.mj_model, width=1280, height=720)
+
+        # Enable lighting for better visual quality
+        # Keep shadows enabled for depth perception
+        # Disable only expensive features
+        self.renderer.scene.flags[mujoco.mjtRndFlag.mjRND_REFLECTION] = False
+        self.renderer.scene.flags[mujoco.mjtRndFlag.mjRND_FOG] = False
+        self.renderer.scene.flags[mujoco.mjtRndFlag.mjRND_HAZE] = False
+
     def _load_model(self, model_name: str, use_scene: bool) -> mujoco.MjModel:
         """Load a MuJoCo model from the models directory."""
         model_dir = MODELS_DIR / model_name
@@ -71,7 +80,15 @@ class Env:
         if not xml_path.exists():
             raise ValueError(f"XML file not found: {xml_path}")
 
-        return mujoco.MjModel.from_xml_path(str(xml_path))
+        model = mujoco.MjModel.from_xml_path(str(xml_path))
+        
+        # Set offscreen framebuffer size for high-resolution rendering
+        if model.vis.global_.offwidth < 1280:
+            model.vis.global_.offwidth = 1280
+        if model.vis.global_.offheight < 720:
+            model.vis.global_.offheight = 720
+        
+        return model
 
     def reset(self, data: mjx.Data, rng: jax.Array) -> mjx.Data:
         """Reset the environment to an initial state.
@@ -89,6 +106,7 @@ class Env:
     def _reset(self, data: mjx.Data, rng: jax.Array) -> mjx.Data:
         """Subclass-specific reset logic."""
         pass
+
 
 
 def list_available_models() -> list[str]:

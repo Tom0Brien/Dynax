@@ -1,19 +1,161 @@
 """Optimized evaluation utilities for dynamics models."""
 
 from pathlib import Path
-from typing import Callable, Dict, Optional, Tuple
+from typing import Callable, Dict, Optional
 
 import jax
 import jax.numpy as jnp
 import matplotlib
-matplotlib.use("Agg")  # Non-interactive backend
 import matplotlib.pyplot as plt
 import numpy as np
 from mujoco import mjx
 
+matplotlib.use("Agg")  # Non-interactive backend
+
 from dynax.base import BaseDynamicsModel, DynamicsModelParams
 from dynax.envs import Env
 from dynax.utils.data import DynamicsDataset, extract_state_features
+
+
+def render_trajectory_video(
+    env: Env,
+    true_states: jax.Array,
+    pred_states: jax.Array,
+    fps: int = 30,
+    save_path: Optional[Path] = None,
+    max_frames: int = 200,
+) -> np.ndarray:
+    """Render video showing both true and predicted trajectories.
+
+    The true trajectory is rendered normally, and the predicted trajectory
+    is rendered with transparency and light blue color.
+
+    Args:
+        env: Environment with model and renderer.
+        true_states: True state trajectory, shape (T+1, state_dim).
+        pred_states: Predicted state trajectory, shape (T+1, state_dim).
+        fps: Frames per second for the video.
+        save_path: Optional path to save video file.
+        max_frames: Maximum number of frames to render (for speed).
+
+    Returns:
+        Video frames with shape (T, H, W, C) for moviepy.
+    """
+    import mujoco
+    from mujoco import mjx
+
+    sim_dt = env.dt
+    render_dt = 1.0 / fps
+    render_every = int(round(render_dt / sim_dt))
+    num_steps = len(true_states)
+    steps = np.arange(0, num_steps, render_every)
+
+    # Limit number of frames for speed
+    if len(steps) > max_frames:
+        step_indices = np.linspace(0, len(steps) - 1, max_frames, dtype=int)
+        steps = steps[step_indices]
+
+    frames = []
+    nq = env.model.nq
+
+    # Convert all states to numpy once (faster)
+    true_states_np = np.array(true_states)
+    pred_states_np = np.array(pred_states)
+
+    # Store original colors for restoration
+    original_rgba = env.mj_model.geom_rgba.copy()
+
+    # Create a second renderer for predicted trajectory (same resolution)
+    pred_renderer = mujoco.Renderer(env.mj_model, width=1280, height=720)
+    # Enable lighting for predicted renderer too
+    pred_renderer.scene.flags[mujoco.mjtRndFlag.mjRND_REFLECTION] = False
+    pred_renderer.scene.flags[mujoco.mjtRndFlag.mjRND_FOG] = False
+    pred_renderer.scene.flags[mujoco.mjtRndFlag.mjRND_HAZE] = False
+
+    # Predicted trajectory color (light blue)
+    pred_color = np.array([0.5, 0.8, 1.0, 0.7])  # RGBA: 70% opacity
+
+    for i in steps:
+        # Use pre-converted numpy arrays
+        true_state = true_states_np[i]
+        pred_state = pred_states_np[i]
+
+        # True trajectory: render with normal colors (default model)
+        true_data = mjx.make_data(env.model)
+        true_data = true_data.replace(
+            qpos=jnp.array(true_state[:nq]), qvel=jnp.array(true_state[nq:])
+        )
+        true_data = mjx.forward(env.model, true_data)
+        true_mj_data = mjx.get_data(env.mj_model, true_data)
+
+        # Render true trajectory first (normal colors, with lighting)
+        env.renderer.update_scene(true_mj_data)
+        true_frame = env.renderer.render().astype(np.float32)  # H, W, C
+
+        # Temporarily modify colors for predicted trajectory
+        env.mj_model.geom_rgba[:] = pred_color
+        # Predicted trajectory: render with modified colors
+        pred_data = mjx.make_data(env.model)
+        pred_data = pred_data.replace(
+            qpos=jnp.array(pred_state[:nq]), qvel=jnp.array(pred_state[nq:])
+        )
+        pred_data = mjx.forward(env.model, pred_data)
+        pred_mj_data = mjx.get_data(env.mj_model, pred_data)
+
+        # Render predicted trajectory (colored, with lighting)
+        pred_renderer.update_scene(pred_mj_data)
+        pred_frame = pred_renderer.render().astype(np.float32)  # H, W, C
+
+        # Restore original colors immediately
+        env.mj_model.geom_rgba[:] = original_rgba
+
+        # Create mask for predicted geometry (differs from background)
+        bg_color = np.array([135.0, 206.0, 250.0])  # Sky color
+        diff_from_bg = np.linalg.norm(
+            pred_frame - bg_color[None, None, :], axis=2
+        )
+        pred_mask = (diff_from_bg > 30).astype(np.float32)[:, :, None]
+
+        # Tint predicted frame to light blue
+        pred_tinted = pred_frame.copy()
+        # Reduce red, slight green, increase blue for light blue tint
+        pred_tinted[:, :, 0] = np.clip(pred_tinted[:, :, 0] * 0.5, 0, 255)
+        pred_tinted[:, :, 1] = np.clip(pred_tinted[:, :, 1] * 0.8, 0, 255)
+        pred_tinted[:, :, 2] = np.clip(pred_tinted[:, :, 2] * 1.2, 0, 255)
+
+        # Alpha composite: blend predicted over true
+        alpha = pred_color[3]  # 0.7 = 70% opacity
+        blended = (
+            pred_tinted * alpha * pred_mask
+            + true_frame * (1 - alpha * pred_mask)
+        ).astype(np.uint8)
+
+        frames.append(blended)
+
+    frames = np.stack(frames)  # Shape: (T, H, W, C)
+
+    # Save video if path provided
+    if save_path is not None:
+        from moviepy.video.io.ImageSequenceClip import ImageSequenceClip
+
+        save_path = Path(save_path)
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Convert frames to list for moviepy (expects list of HWC arrays)
+        frame_list = [frame for frame in frames]
+
+        # Create video clip with high quality settings
+        clip = ImageSequenceClip(frame_list, fps=fps)
+        clip.write_videofile(
+            str(save_path),
+            fps=fps,
+            codec="libx264",
+            bitrate="8000k",  # High bitrate for quality
+            preset="medium",  # Balance between speed and compression
+            logger=None,
+        )
+
+    return frames
 
 
 def evaluate_single_step(
@@ -341,11 +483,11 @@ def plot_trajectories(
         Figure as numpy array for TensorBoard (shape: H, W, 3).
     """
     num_rollouts = min(num_plots, len(true_trajectories))
-    nv = state_dim - nq
 
     # Create subplots: one row per rollout, one column per state dimension
+    # Use smaller figure size and lower DPI for faster rendering
     fig, axes = plt.subplots(
-        num_rollouts, state_dim, figsize=(3 * state_dim, 2 * num_rollouts)
+        num_rollouts, state_dim, figsize=(2.5 * state_dim, 1.5 * num_rollouts), dpi=100
     )
     if num_rollouts == 1:
         axes = axes[None, :]
@@ -354,42 +496,47 @@ def plot_trajectories(
 
     time_steps = np.arange(len(true_trajectories[0]))
 
+    # Convert trajectories to numpy once (faster)
+    true_trajs_np = np.array(true_trajectories[:num_rollouts])
+    pred_trajs_np = np.array(pred_trajectories[:num_rollouts])
+
     for rollout_idx in range(num_rollouts):
-        true_traj = np.array(true_trajectories[rollout_idx])
-        pred_traj = np.array(pred_trajectories[rollout_idx])
+        true_traj = true_trajs_np[rollout_idx]
+        pred_traj = pred_trajs_np[rollout_idx]
 
         for dim_idx in range(state_dim):
             ax = axes[rollout_idx, dim_idx]
 
-            ax.plot(time_steps, true_traj[:, dim_idx], "b-", label="True", linewidth=2)
+            # Use thinner lines and simpler styling for speed
+            ax.plot(time_steps, true_traj[:, dim_idx], "b-", label="True", linewidth=1.5)
             ax.plot(
-                time_steps, pred_traj[:, dim_idx], "r--", label="Predicted", linewidth=2
+                time_steps, pred_traj[:, dim_idx], "r--", label="Pred", linewidth=1.5
             )
 
             # Label first row
             if rollout_idx == 0:
                 if dim_idx < nq:
-                    ax.set_title(f"Position {dim_idx}")
+                    ax.set_title(f"Pos {dim_idx}", fontsize=9)
                 else:
-                    ax.set_title(f"Velocity {dim_idx - nq}")
+                    ax.set_title(f"Vel {dim_idx - nq}", fontsize=9)
 
             # Label first column
             if dim_idx == 0:
-                ax.set_ylabel(f"Rollout {rollout_idx + 1}")
+                ax.set_ylabel(f"R{rollout_idx + 1}", fontsize=8)
 
-            ax.grid(True, alpha=0.3)
-            ax.legend(fontsize=8)
+            ax.grid(True, alpha=0.2, linewidth=0.5)
+            if rollout_idx == 0 and dim_idx == 0:
+                ax.legend(fontsize=7, loc="upper right")
 
-    plt.tight_layout()
+    plt.tight_layout(pad=0.5)
 
-    # Save figure if path provided
+    # Save figure if path provided (lower DPI for speed)
     if save_path is not None:
         save_path.parent.mkdir(parents=True, exist_ok=True)
-        plt.savefig(save_path, dpi=150, bbox_inches="tight")
+        plt.savefig(save_path, dpi=100, bbox_inches="tight")
 
-    # Convert to numpy array for TensorBoard
+    # Convert to numpy array for TensorBoard (faster method)
     fig.canvas.draw()
-    # Get RGBA buffer and convert to RGB
     buf = np.frombuffer(fig.canvas.buffer_rgba(), dtype=np.uint8)
     width, height = fig.canvas.get_width_height()
     buf = buf.reshape((height, width, 4))[:, :, :3]  # Remove alpha channel
