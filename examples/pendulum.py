@@ -9,7 +9,6 @@ import numpy as np
 
 from dynax import TrainingConfig, train_dynamics_model
 from dynax.architectures import ResNetNeuralModel
-from dynax.base_neural_model import BaseNeuralModel
 from dynax.envs import PendulumEnv
 from dynax.mpc import NeuralTask
 from dynax.utils import HydraxController, collect_and_prepare_data
@@ -90,14 +89,14 @@ def train_model(model_path: str = "models/pendulum_neural.pkl"):
     print("=" * 60)
 
 
-def test_model(model_path: str = "models/pendulum_neural.pkl"):
+def mpc_model(model_path: str = "models/pendulum_neural.pkl"):
     """Load a trained model and run interactive MPC simulation.
 
     Args:
         model_path: Path to the saved model.
     """
     print("=" * 60)
-    print("TEST MODE - Interactive MPC Simulation")
+    print("MPC MODE - Interactive MPC Simulation")
     print("=" * 60)
 
     # Load model
@@ -114,7 +113,8 @@ def test_model(model_path: str = "models/pendulum_neural.pkl"):
     )
 
     # Load model parameters
-    model_params = BaseNeuralModel.load_model(model_path)
+    print("Loading model parameters...")
+    model_params = dynamics_model.load_model(model_path)
 
     # Create base task and neural task
     print("Creating neural task...")
@@ -160,7 +160,7 @@ def test_model(model_path: str = "models/pendulum_neural.pkl"):
 def main():
     """Main entry point."""
     parser = argparse.ArgumentParser(
-        description="Train or test a neural dynamics model for pendulum MPC."
+        description="Train a neural dynamics model or run MPC for pendulum."
     )
     subparsers = parser.add_subparsers(dest="mode", required=True)
 
@@ -173,9 +173,11 @@ def main():
         help="Path to save the trained model",
     )
 
-    # Test mode
-    test_parser = subparsers.add_parser("test", help="Test the model with MPC")
-    test_parser.add_argument(
+    # MPC mode
+    mpc_parser = subparsers.add_parser(
+        "mpc", help="Run MPC with the trained model"
+    )
+    mpc_parser.add_argument(
         "--model-path",
         type=str,
         default="models/pendulum_neural.pkl",
@@ -186,8 +188,8 @@ def main():
 
     if args.mode == "train":
         train_model(model_path=args.model_path)
-    elif args.mode == "test":
-        test_model(model_path=args.model_path)
+    elif args.mode == "mpc":
+        mpc_model(model_path=args.model_path)
 
 
 if __name__ == "__main__":

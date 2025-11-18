@@ -186,8 +186,7 @@ class BaseNeuralModel(nn.Module):
         with open(path, "wb") as f:
             pickle.dump(params_dict, f)
 
-    @staticmethod
-    def load_model(path: str | Path) -> NeuralModelParams:
+    def load_model(self, path: str | Path) -> NeuralModelParams:
         """Load model parameters from disk.
 
         Args:

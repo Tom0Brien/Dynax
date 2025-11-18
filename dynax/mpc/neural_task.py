@@ -1,7 +1,6 @@
 """Neural task wrapper for hydrax that uses learned dynamics models."""
 
 from pathlib import Path
-from typing import Optional
 
 import jax
 from mujoco import mjx
@@ -25,21 +24,17 @@ class NeuralTask(Task):
         self,
         base_task: Task,
         dynamics_model: BaseNeuralModel,
-        model_params: Optional[NeuralModelParams] = None,
-        model_path: Optional[str | Path] = None,
+        model_params: NeuralModelParams,
     ) -> None:
         """Initialize the neural task wrapper.
 
         Args:
             base_task: The base hydrax Task to wrap (provides cost functions).
             dynamics_model: The neural dynamics model to use for stepping.
-            model_params: Optional pre-loaded model parameters. If None and
-                model_path is provided, parameters will be loaded from disk.
-            model_path: Optional path to saved model parameters file.
+            model_params: Pre-loaded model parameters.
 
         Raises:
             ValueError: If dynamics_model has history_length != 1.
-            FileNotFoundError: If model_path is provided but file doesn't exist.
         """
         # Validate history_length
         if dynamics_model.history_length != 1:
@@ -61,16 +56,7 @@ class NeuralTask(Task):
 
         self.base_task = base_task
         self.dynamics_model = dynamics_model
-
-        # Load or set model parameters
-        if model_params is not None:
-            self.model_params = model_params
-        elif model_path is not None:
-            self.model_params = self.load_model(model_path)
-        else:
-            raise ValueError(
-                "Either model_params or model_path must be provided"
-            )
+        self.model_params = model_params
 
         # JIT-compile the step function for performance
         self._step_fn = jax.jit(self._neural_step)
@@ -159,19 +145,4 @@ class NeuralTask(Task):
                 if not provided).
         """
         self.dynamics_model.save_model(self.model_params, path)
-
-    @staticmethod
-    def load_model(path: str | Path) -> NeuralModelParams:
-        """Load model parameters from disk.
-
-        Args:
-            path: Path to the saved model parameters file.
-
-        Returns:
-            Loaded NeuralModelParams.
-
-        Raises:
-            FileNotFoundError: If the file doesn't exist.
-        """
-        return BaseNeuralModel.load_model(path)
 
