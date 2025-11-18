@@ -41,6 +41,7 @@ def render_trajectory_video(
     Returns:
         Video frames with shape (T, H, W, C) for moviepy.
     """
+    import subprocess
     import mujoco
     from mujoco import mjx
 
@@ -55,7 +56,6 @@ def render_trajectory_video(
         step_indices = np.linspace(0, len(steps) - 1, max_frames, dtype=int)
         steps = steps[step_indices]
 
-    frames = []
     nq = env.model.nq
 
     # Convert all states to numpy once (faster)
@@ -75,6 +75,130 @@ def render_trajectory_video(
     # Predicted trajectory color (light blue)
     pred_color = np.array([0.5, 0.8, 1.0, 0.7])  # RGBA: 70% opacity
 
+    # Use FFmpeg for faster video encoding if save_path provided
+    if save_path is not None:
+        save_path = Path(save_path)
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Get renderer dimensions
+        render_width = env.renderer.width
+        render_height = env.renderer.height
+
+        # Set up FFmpeg process for direct streaming
+        try:
+            cmd = [
+                "ffmpeg",
+                "-y",  # Overwrite output file
+                "-f",
+                "rawvideo",
+                "-vcodec",
+                "rawvideo",
+                "-s",
+                f"{render_width}x{render_height}",
+                "-pix_fmt",
+                "rgb24",
+                "-r",
+                str(fps),
+                "-i",
+                "-",  # Input from stdin
+                "-an",  # No audio
+                "-vcodec",
+                "h264",
+                "-crf",
+                "23",  # Good quality, faster than crf=1
+                "-preset",
+                "fast",  # Faster encoding
+                "-pix_fmt",
+                "yuv420p",
+                "-loglevel",
+                "error",
+                str(save_path),
+            ]
+
+            ffmpeg_process = subprocess.Popen(cmd, stdin=subprocess.PIPE)
+
+            # Render frames and stream directly to FFmpeg
+            for i in steps:
+                # Use pre-converted numpy arrays
+                true_state = true_states_np[i]
+                pred_state = pred_states_np[i]
+
+                # True trajectory: render with normal colors (default model)
+                true_data = mjx.make_data(env.model)
+                true_data = true_data.replace(
+                    qpos=jnp.array(true_state[:nq]),
+                    qvel=jnp.array(true_state[nq:]),
+                )
+                true_data = mjx.forward(env.model, true_data)
+                true_mj_data = mjx.get_data(env.mj_model, true_data)
+
+                # Render true trajectory first (normal colors, with lighting)
+                env.renderer.update_scene(true_mj_data)
+                true_frame = env.renderer.render()  # H, W, C (uint8)
+
+                # Temporarily modify colors for predicted trajectory
+                env.mj_model.geom_rgba[:] = pred_color
+                # Predicted trajectory: render with modified colors
+                pred_data = mjx.make_data(env.model)
+                pred_data = pred_data.replace(
+                    qpos=jnp.array(pred_state[:nq]),
+                    qvel=jnp.array(pred_state[nq:]),
+                )
+                pred_data = mjx.forward(env.model, pred_data)
+                pred_mj_data = mjx.get_data(env.mj_model, pred_data)
+
+                # Render predicted trajectory (colored, with lighting)
+                pred_renderer.update_scene(pred_mj_data)
+                pred_frame = pred_renderer.render()  # H, W, C (uint8)
+
+                # Restore original colors immediately
+                env.mj_model.geom_rgba[:] = original_rgba
+
+                # Create mask for predicted geometry (differs from background)
+                bg_color = np.array([135.0, 206.0, 250.0])  # Sky color
+                diff_from_bg = np.linalg.norm(
+                    pred_frame.astype(np.float32)
+                    - bg_color[None, None, :],
+                    axis=2,
+                )
+                pred_mask = (diff_from_bg > 30).astype(np.float32)[:, :, None]
+
+                # Tint predicted frame to light blue
+                pred_tinted = pred_frame.astype(np.float32).copy()
+                # Reduce red, slight green, increase blue for light blue tint
+                pred_tinted[:, :, 0] = np.clip(
+                    pred_tinted[:, :, 0] * 0.5, 0, 255
+                )
+                pred_tinted[:, :, 1] = np.clip(
+                    pred_tinted[:, :, 1] * 0.8, 0, 255
+                )
+                pred_tinted[:, :, 2] = np.clip(
+                    pred_tinted[:, :, 2] * 1.2, 0, 255
+                )
+
+                # Alpha composite: blend predicted over true
+                alpha = pred_color[3]  # 0.7 = 70% opacity
+                blended = (
+                    pred_tinted * alpha * pred_mask
+                    + true_frame.astype(np.float32) * (1 - alpha * pred_mask)
+                ).astype(np.uint8)
+
+                # Write frame directly to FFmpeg (RGB format)
+                ffmpeg_process.stdin.write(blended.tobytes())
+
+            # Close FFmpeg process
+            ffmpeg_process.stdin.close()
+            ffmpeg_process.wait()
+
+            # Return empty array since we streamed directly
+            return np.array([])
+
+        except (subprocess.SubprocessError, FileNotFoundError):
+            # Fallback to moviepy if FFmpeg not available
+            pass
+
+    # Fallback: collect frames and use moviepy (slower)
+    frames = []
     for i in steps:
         # Use pre-converted numpy arrays
         true_state = true_states_np[i]
@@ -134,7 +258,7 @@ def render_trajectory_video(
 
     frames = np.stack(frames)  # Shape: (T, H, W, C)
 
-    # Save video if path provided
+    # Save video if path provided (fallback to moviepy)
     if save_path is not None:
         from moviepy.video.io.ImageSequenceClip import ImageSequenceClip
 
@@ -156,6 +280,112 @@ def render_trajectory_video(
         )
 
     return frames
+
+
+def render_single_trajectory_video(
+    env: Env,
+    states: jax.Array,
+    fps: int = 30,
+    save_path: Optional[Path] = None,
+    max_frames: int = 500,
+) -> None:
+    """Render a simple video of a single trajectory (optimized for speed).
+
+    Uses CPU MuJoCo directly for faster rendering.
+
+    Args:
+        env: Environment with model and renderer.
+        states: State trajectory, shape (T+1, state_dim).
+        fps: Frames per second for the video.
+        save_path: Path to save video file.
+        max_frames: Maximum number of frames to render.
+    """
+    import subprocess
+    import mujoco
+
+    sim_dt = env.dt
+    render_dt = 1.0 / fps
+    render_every = int(round(render_dt / sim_dt))
+    num_steps = len(states)
+    steps = np.arange(0, num_steps, render_every)
+
+    # Limit number of frames for speed
+    if len(steps) > max_frames:
+        step_indices = np.linspace(0, len(steps) - 1, max_frames, dtype=int)
+        steps = steps[step_indices]
+
+    nq = env.mj_model.nq
+    states_np = np.array(states)
+
+    save_path = Path(save_path)
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Get renderer dimensions
+    render_width = env.renderer.width
+    render_height = env.renderer.height
+
+    # Create CPU MuJoCo data object (faster than MJX for single-threaded)
+    mj_data = mujoco.MjData(env.mj_model)
+
+    # Set up FFmpeg process for direct streaming
+    try:
+        cmd = [
+            "ffmpeg",
+            "-y",
+            "-f",
+            "rawvideo",
+            "-vcodec",
+            "rawvideo",
+            "-s",
+            f"{render_width}x{render_height}",
+            "-pix_fmt",
+            "rgb24",
+            "-r",
+            str(fps),
+            "-i",
+            "-",
+            "-an",
+            "-vcodec",
+            "h264",
+            "-crf",
+            "23",
+            "-preset",
+            "fast",
+            "-pix_fmt",
+            "yuv420p",
+            "-loglevel",
+            "error",
+            str(save_path),
+        ]
+
+        ffmpeg_process = subprocess.Popen(cmd, stdin=subprocess.PIPE)
+
+        # Render frames and stream directly to FFmpeg
+        for i in steps:
+            state = states_np[i]
+
+            # Set state directly in CPU MuJoCo data
+            mj_data.qpos[:] = state[:nq]
+            mj_data.qvel[:] = state[nq:]
+
+            # Forward kinematics (CPU MuJoCo is faster for single operations)
+            mujoco.mj_forward(env.mj_model, mj_data)
+
+            # Render frame
+            env.renderer.update_scene(mj_data)
+            frame = env.renderer.render()  # H, W, C (uint8)
+
+            # Write frame directly to FFmpeg (RGB format)
+            ffmpeg_process.stdin.write(frame.tobytes())
+
+        # Close FFmpeg process
+        ffmpeg_process.stdin.close()
+        ffmpeg_process.wait()
+
+    except (subprocess.SubprocessError, FileNotFoundError):
+        raise RuntimeError(
+            "FFmpeg not found. Please install FFmpeg for video rendering."
+        )
 
 
 def evaluate_single_step(

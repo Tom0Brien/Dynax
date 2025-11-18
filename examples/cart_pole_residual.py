@@ -1,4 +1,4 @@
-"""Train residual dynamics model for pendulum with varying friction/mass."""
+"""Train residual dynamics model for cart pole with varying friction/mass."""
 
 import argparse
 from pathlib import Path
@@ -12,17 +12,21 @@ from mujoco import mjx
 
 from dynax import TrainingConfig, train_dynamics_model
 from dynax.architectures import ResidualNeuralModel
-from dynax.envs import PendulumEnv
-from dynax.evaluation import create_rollout_fn, create_true_rollout_fn
+from dynax.envs import CartPoleEnv
+from dynax.evaluation import (
+    create_rollout_fn,
+    create_true_rollout_fn,
+    render_single_trajectory_video,
+)
 from dynax.mpc import NeuralTask
 from dynax.utils import collect_and_prepare_data
 from dynax.utils.data import extract_state_features
 from hydrax.algs import PredictiveSampling
-from hydrax.tasks.pendulum import Pendulum as HydraxPendulumTask
+from hydrax.tasks.cart_pole import CartPole as HydraxCartPoleTask
 
 
-class PendulumEnvVaried(PendulumEnv):
-    """Pendulum environment with hardcoded varied mass and friction."""
+class CartPoleEnvVaried(CartPoleEnv):
+    """Cart pole environment with hardcoded varied mass and friction."""
 
     mass: float = 1.5
     friction: float = 0.1
@@ -32,24 +36,24 @@ class PendulumEnvVaried(PendulumEnv):
         # Load the base model using parent's method
         model = super()._load_model(model_name, use_scene)
 
-        # Modify mass
-        # Find pendulum body (usually body 1, after world body)
-        # For pendulum, typically the bob is body 1
-        if model.nbody > 1:
-            model.body_mass[1] = model.body_mass[1] * self.mass
-            # Also scale inertia proportionally (inertia is 3D vector)
-            model.body_inertia[1, :] = model.body_inertia[1, :] * self.mass
+        # Modify mass of pole (usually body 2, after world and cart)
+        # For cart pole: body 0 = world, body 1 = cart, body 2 = pole
+        if model.nbody > 2:
+            model.body_mass[2] = model.body_mass[2] * self.mass
+            # Also scale inertia proportionally
+            model.body_inertia[2, :] = model.body_inertia[2, :] * self.mass
 
         # Modify friction
         # Set DOF friction loss (stored per DOF, not per joint)
-        # For pendulum, there's typically one DOF (nv=1)
+        # For cart pole, there are typically 2 DOFs
+        # (cart translation, pole rotation)
         if model.nv > 0:
             model.dof_frictionloss[:] = self.friction
 
         return model
 
 
-def train_model(model_path: str = "models/pendulum_residual.pkl"):
+def train_model(model_path: str = "models/cart_pole_residual.pkl"):
     """Train a residual dynamics model and save it to disk.
 
     Args:
@@ -62,7 +66,7 @@ def train_model(model_path: str = "models/pendulum_residual.pkl"):
     # Create environment with varied parameters for data collection
     # This single varied model will be used for both data collection
     # and prediction
-    varied_env = PendulumEnvVaried()
+    varied_env = CartPoleEnvVaried()
 
     print(
         f"Using varied parameters: mass={varied_env.mass}, "
@@ -78,7 +82,7 @@ def train_model(model_path: str = "models/pendulum_residual.pkl"):
         num_rollouts=500,
         rollout_length=100,
         rng=rng,
-        dataset_path="data/pendulum_varied_dataset.pkl",
+        dataset_path="data/cart_pole_varied_dataset.pkl",
         controller=None,  # Use random actions only
         num_controlled_rollouts=0,
         force_recollect=False,
@@ -93,7 +97,7 @@ def train_model(model_path: str = "models/pendulum_residual.pkl"):
     # The residual model will use the base physics model, and the NN will learn
     # to correct for the difference between base model and true dynamics
     # (which has varied parameters)
-    base_env = PendulumEnv()
+    base_env = CartPoleEnv()
     dynamics_model = ResidualNeuralModel(
         env=base_env,
         hidden_dims=(500, 500),
@@ -110,7 +114,7 @@ def train_model(model_path: str = "models/pendulum_residual.pkl"):
             batch_size=512,
             learning_rate=1e-3,
             noise_std=0.0,  # Disable noise
-            log_dir="logs/pendulum_residual",
+            log_dir="logs/cart_pole_residual",
             render_videos=False,
         ),
         rng=train_rng,
@@ -287,7 +291,7 @@ def train_model(model_path: str = "models/pendulum_residual.pkl"):
     axes[0, 1].legend()
     axes[0, 1].grid(True, alpha=0.3)
 
-    # Plot 3: Sample trajectory (position)
+    # Plot 3: Sample trajectory (cart position)
     traj_idx = 0
     axes[1, 0].plot(
         time_steps,
@@ -311,12 +315,14 @@ def train_model(model_path: str = "models/pendulum_residual.pkl"):
         alpha=0.7,
     )
     axes[1, 0].set_xlabel("Time (s)")
-    axes[1, 0].set_ylabel("Position (q)")
-    axes[1, 0].set_title(f"Sample Trajectory: Position (Rollout {traj_idx+1})")
+    axes[1, 0].set_ylabel("Cart Position (q)")
+    axes[1, 0].set_title(
+        f"Sample Trajectory: Cart Position (Rollout {traj_idx+1})"
+    )
     axes[1, 0].legend()
     axes[1, 0].grid(True, alpha=0.3)
 
-    # Plot 4: Sample trajectory (velocity)
+    # Plot 4: Sample trajectory (pole angle)
     axes[1, 1].plot(
         time_steps,
         true_trajs[traj_idx, :, 1],
@@ -339,13 +345,15 @@ def train_model(model_path: str = "models/pendulum_residual.pkl"):
         alpha=0.7,
     )
     axes[1, 1].set_xlabel("Time (s)")
-    axes[1, 1].set_ylabel("Velocity (v)")
-    axes[1, 1].set_title(f"Sample Trajectory: Velocity (Rollout {traj_idx+1})")
+    axes[1, 1].set_ylabel("Pole Angle (q)")
+    axes[1, 1].set_title(
+        f"Sample Trajectory: Pole Angle (Rollout {traj_idx+1})"
+    )
     axes[1, 1].legend()
     axes[1, 1].grid(True, alpha=0.3)
 
     plt.tight_layout()
-    plot_path = "logs/pendulum_residual/comparison_plot.png"
+    plot_path = "logs/cart_pole_residual/comparison_plot.png"
     plt.savefig(plot_path, dpi=150, bbox_inches="tight")
     print(f"\nPlot saved to: {plot_path}")
     plt.close()
@@ -353,7 +361,7 @@ def train_model(model_path: str = "models/pendulum_residual.pkl"):
     print("=" * 60)
 
 
-def eval_model(model_path: str = "models/pendulum_residual.pkl"):
+def eval_model(model_path: str = "models/cart_pole_residual.pkl"):
     """Evaluate MPC performance with base vs learned models.
 
     Args:
@@ -370,8 +378,8 @@ def eval_model(model_path: str = "models/pendulum_residual.pkl"):
         raise FileNotFoundError(f"Model file not found: {model_path_obj}")
 
     # Create environments
-    varied_env = PendulumEnvVaried()
-    base_env = PendulumEnv()
+    varied_env = CartPoleEnvVaried()
+    base_env = CartPoleEnv()
 
     # Create model architecture (must match training)
     dynamics_model = ResidualNeuralModel(
@@ -385,35 +393,35 @@ def eval_model(model_path: str = "models/pendulum_residual.pkl"):
     model_params = dynamics_model.load_model(model_path_obj)
 
     # Create tasks
-    base_task = HydraxPendulumTask()
+    base_task = HydraxCartPoleTask()
     neural_task = NeuralTask(
         base_task=base_task,
         dynamics_model=dynamics_model,
         model_params=model_params,
     )
 
-    # Create MPC controllers
+    # Create MPC controllers (using parameters from hydrax examples)
     print("Creating MPC controllers...")
     base_ctrl = PredictiveSampling(
         base_task,
-        num_samples=32,
-        noise_level=0.1,
+        num_samples=128,
+        noise_level=0.3,
         plan_horizon=1.0,
-        spline_type="zero",
-        num_knots=11,
+        spline_type="cubic",
+        num_knots=4,
     )
     learned_ctrl = PredictiveSampling(
         neural_task,
-        num_samples=32,
-        noise_level=0.1,
+        num_samples=128,
+        noise_level=0.3,
         plan_horizon=1.0,
-        spline_type="zero",
-        num_knots=11,
+        spline_type="cubic",
+        num_knots=4,
     )
 
     # Evaluation parameters
     num_episodes = 20
-    episode_length = 100  # steps
+    episode_length = 500  # steps
     rng = jax.random.PRNGKey(42)
 
     print(f"\nRunning {num_episodes} episodes in parallel...")
@@ -423,14 +431,37 @@ def eval_model(model_path: str = "models/pendulum_residual.pkl"):
     rng, reset_rng = jax.random.split(rng)
     reset_rngs = jax.random.split(reset_rng, num_episodes)
 
-    def reset_episode(rng_key):
-        """Reset a single episode."""
+    def reset_episode_eval(rng_key):
+        """Reset episode for evaluation with zero initial velocities."""
+        (
+            rng_key,
+            cart_rng,
+            angle_rng,
+        ) = jax.random.split(rng_key, 3)
+
+        # Cart position: random in range [-1.5, 1.5] (within rail limits)
+        cart_pos = jax.random.uniform(
+            cart_rng, (), minval=-0.5, maxval=0.5
+        )
+
+        # Pole angle: random in range [-pi, pi]
+        angle = jax.random.uniform(
+            angle_rng, (), minval=-jnp.pi, maxval=jnp.pi
+        )
+
+        # Velocities: zero for evaluation
+        cart_vel = 0.0
+        angle_vel = 0.0
+
         data = mjx.make_data(varied_env.model)
-        data = varied_env.reset(data, rng_key)
+        data = data.replace(
+            qpos=jnp.array([cart_pos, angle]),
+            qvel=jnp.array([cart_vel, angle_vel]),
+        )
         data = mjx.forward(varied_env.model, data)
         return data
 
-    initial_states = jax.vmap(reset_episode)(reset_rngs)
+    initial_states = jax.vmap(reset_episode_eval)(reset_rngs)
 
     # JIT-compiled step function for true dynamics
     @jax.jit
@@ -487,7 +518,7 @@ def eval_model(model_path: str = "models/pendulum_residual.pkl"):
     learned_jit_interp = jax.jit(learned_ctrl.interp_func)
 
     # Run single episode with a controller
-    def run_episode_base(initial_state, episode_rng):
+    def run_episode_base(initial_state, episode_rng, return_trajectory=False):
         """Run a single MPC episode with base controller."""
         return _run_episode(
             initial_state,
@@ -495,9 +526,12 @@ def eval_model(model_path: str = "models/pendulum_residual.pkl"):
             base_jit_optimize,
             base_jit_interp,
             sync_to_base_model,
+            return_trajectory=return_trajectory,
         )
 
-    def run_episode_learned(initial_state, episode_rng):
+    def run_episode_learned(
+        initial_state, episode_rng, return_trajectory=False
+    ):
         """Run a single MPC episode with learned controller."""
         return _run_episode(
             initial_state,
@@ -505,10 +539,16 @@ def eval_model(model_path: str = "models/pendulum_residual.pkl"):
             learned_jit_optimize,
             learned_jit_interp,
             sync_to_neural_model,
+            return_trajectory=return_trajectory,
         )
 
     def _run_episode(
-        initial_state, ctrl, jit_optimize, jit_interp, sync_fn
+        initial_state,
+        ctrl,
+        jit_optimize,
+        jit_interp,
+        sync_fn,
+        return_trajectory=False,
     ):
         """Run a single MPC episode."""
         true_state = initial_state
@@ -568,13 +608,25 @@ def eval_model(model_path: str = "models/pendulum_residual.pkl"):
             # Step true dynamics (this is what actually happens)
             next_true_state = true_step(true_state, action)
 
-            return (next_true_state, ctrl_state, ctrl_params, total_cost), None
+            # Extract state features for trajectory tracking (after step)
+            state_features = extract_state_features(next_true_state)
+
+            return (
+                (next_true_state, ctrl_state, ctrl_params, total_cost),
+                state_features,
+            )
 
         # Run episode
-        (final_true_state, _, _, total_cost), _ = jax.lax.scan(
+        (final_true_state, _, _, total_cost), trajectory = jax.lax.scan(
             step_fn,
             (true_state, ctrl_state, ctrl_params, total_cost),
             jnp.arange(episode_length),
+        )
+
+        # Add initial state to trajectory
+        initial_features = extract_state_features(initial_state)
+        trajectory = jnp.concatenate(
+            [initial_features[None, :], trajectory], axis=0
         )
 
         # Add terminal cost using synced final state
@@ -582,6 +634,8 @@ def eval_model(model_path: str = "models/pendulum_residual.pkl"):
         terminal_cost = compute_terminal_cost(final_ctrl_state)
         total_cost = total_cost + terminal_cost
 
+        if return_trajectory:
+            return total_cost, trajectory
         return total_cost
 
     # Run episodes in parallel for both controllers
@@ -597,6 +651,56 @@ def eval_model(model_path: str = "models/pendulum_residual.pkl"):
     learned_costs = jax.vmap(run_episode_learned)(
         initial_states, learned_rngs
     )
+
+    # Run a single episode with trajectory tracking for visualization
+    print("\nRendering videos for visualization...")
+    num_videos = 1  # Start with 1 video
+
+    for vid_idx in range(num_videos):
+        # Run base controller episode with trajectory
+        base_cost, base_traj = run_episode_base(
+            initial_states[vid_idx],
+            base_rngs[vid_idx],
+            return_trajectory=True,
+        )
+
+        # Run learned controller episode with trajectory
+        learned_cost, learned_traj = run_episode_learned(
+            initial_states[vid_idx],
+            learned_rngs[vid_idx],
+            return_trajectory=True,
+        )
+
+        # Render base controller video
+        base_video_path = (
+            f"logs/cart_pole_residual/base_mpc_episode_{vid_idx}.mp4"
+        )
+        print(f"  Rendering base MPC video: {base_video_path}")
+        render_single_trajectory_video(
+            env=varied_env,
+            states=base_traj,
+            fps=30,
+            save_path=base_video_path,
+            max_frames=500,
+        )
+
+        # Render learned controller video
+        learned_video_path = (
+            f"logs/cart_pole_residual/learned_mpc_episode_{vid_idx}.mp4"
+        )
+        print(f"  Rendering learned MPC video: {learned_video_path}")
+        render_single_trajectory_video(
+            env=varied_env,
+            states=learned_traj,
+            fps=30,
+            save_path=learned_video_path,
+            max_frames=500,
+        )
+
+        print(
+            f"  Base MPC cost: {base_cost:.2f}, "
+            f"Learned MPC cost: {learned_cost:.2f}"
+        )
 
     # Compute statistics
     base_costs_np = np.array(base_costs)
@@ -623,6 +727,70 @@ def eval_model(model_path: str = "models/pendulum_residual.pkl"):
     print(f"  Mean cost: {learned_mean:.4f} ± {learned_std:.4f}")
     print(f"  Min cost:  {np.min(learned_costs_np):.4f}")
     print(f"  Max cost:  {np.max(learned_costs_np):.4f}")
+
+    # Identify worst-performing learned neural MPC episodes
+    num_worst_episodes = min(3, num_episodes)  # Render top 3 worst
+    worst_indices = np.argsort(learned_costs_np)[-num_worst_episodes:][::-1]
+    worst_costs = learned_costs_np[worst_indices]
+
+    print(f"\nWorst {num_worst_episodes} learned neural MPC episodes:")
+    for idx, cost in zip(worst_indices, worst_costs):
+        print(f"  Episode {idx}: cost = {cost:.2f}")
+
+    # Render videos for worst-performing episodes
+    if num_worst_episodes > 0:
+        print("\nRendering videos for worst-performing learned MPC episodes...")
+        for rank, (ep_idx, cost) in enumerate(zip(worst_indices, worst_costs)):
+            print(
+                f"\n  Episode {ep_idx} (rank {rank+1} worst, cost={cost:.2f}):"
+            )
+
+            # Re-run learned controller episode with trajectory tracking
+            learned_cost, learned_traj = run_episode_learned(
+                initial_states[ep_idx],
+                learned_rngs[ep_idx],
+                return_trajectory=True,
+            )
+
+            # Also run base controller for comparison
+            base_cost, base_traj = run_episode_base(
+                initial_states[ep_idx],
+                base_rngs[ep_idx],
+                return_trajectory=True,
+            )
+
+            # Render learned controller video
+            learned_video_path = (
+                f"logs/cart_pole_residual/"
+                f"learned_mpc_worst_{rank+1}_episode_{ep_idx}.mp4"
+            )
+            print(f"    Rendering learned MPC video: {learned_video_path}")
+            render_single_trajectory_video(
+                env=varied_env,
+                states=learned_traj,
+                fps=30,
+                save_path=learned_video_path,
+                max_frames=500,
+            )
+
+            # Render base controller video for comparison
+            base_video_path = (
+                f"logs/cart_pole_residual/"
+                f"base_mpc_worst_{rank+1}_episode_{ep_idx}.mp4"
+            )
+            print(f"    Rendering base MPC video: {base_video_path}")
+            render_single_trajectory_video(
+                env=varied_env,
+                states=base_traj,
+                fps=30,
+                save_path=base_video_path,
+                max_frames=500,
+            )
+
+            print(
+                f"    Base MPC cost: {base_cost:.2f}, "
+                f"Learned MPC cost: {learned_cost:.2f}"
+            )
 
     print(f"\nImprovement: {improvement:.2f}% cost reduction")
     print("=" * 80)
@@ -676,7 +844,7 @@ def eval_model(model_path: str = "models/pendulum_residual.pkl"):
         )
 
     plt.tight_layout()
-    plot_path = "logs/pendulum_residual/mpc_comparison.png"
+    plot_path = "logs/cart_pole_residual/mpc_comparison.png"
     Path(plot_path).parent.mkdir(parents=True, exist_ok=True)
     plt.savefig(plot_path, dpi=150, bbox_inches="tight")
     print(f"\nPlot saved to: {plot_path}")
@@ -688,7 +856,7 @@ def eval_model(model_path: str = "models/pendulum_residual.pkl"):
 def main():
     """Main entry point."""
     parser = argparse.ArgumentParser(
-        description="Train or evaluate a residual dynamics model for pendulum."
+        description="Train or evaluate a residual dynamics model for cart pole."
     )
     subparsers = parser.add_subparsers(dest="mode", required=True)
 
@@ -697,7 +865,7 @@ def main():
     train_parser.add_argument(
         "--model-path",
         type=str,
-        default="models/pendulum_residual.pkl",
+        default="models/cart_pole_residual.pkl",
         help="Path to save the trained model",
     )
 
@@ -706,7 +874,7 @@ def main():
     eval_parser.add_argument(
         "--model-path",
         type=str,
-        default="models/pendulum_residual.pkl",
+        default="models/cart_pole_residual.pkl",
         help="Path to the saved model",
     )
 
@@ -720,3 +888,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
