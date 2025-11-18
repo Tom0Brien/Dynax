@@ -41,7 +41,7 @@ env/
 *.npz
 *.h5
 data/
-models/
+/models/
 checkpoints/
 logs/
 

@@ -1,8 +1,12 @@
 """Base classes for neural dynamics models."""
 
+import pickle
 from abc import abstractmethod
+from pathlib import Path
 
 import jax
+import jax.numpy as jnp
+import numpy as np
 from flax import linen as nn
 from flax.struct import dataclass
 
@@ -142,4 +146,84 @@ class BaseDynamicsModel(nn.Module):
         # Default: residual dynamics (next_state = current_state + output)
         # Use the most recent state from history
         return states[-1] + output
+
+    def save_model(self, params: DynamicsModelParams, path: str | Path) -> None:
+        """Save the model parameters to disk.
+
+        Args:
+            params: Model parameters to save.
+            path: Path to save the model parameters (uses .pkl extension
+                if not provided).
+        """
+        path = Path(path)
+        if not path.suffix:
+            path = path.with_suffix(".pkl")
+
+        # Create parent directory if it doesn't exist
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Convert JAX arrays to numpy for serialization
+        def to_numpy(x):
+            """Recursively convert JAX arrays to numpy arrays."""
+            if isinstance(x, (jax.Array, jnp.ndarray)):
+                return np.array(x)
+            elif isinstance(x, dict):
+                return {k: to_numpy(v) for k, v in x.items()}
+            elif isinstance(x, (list, tuple)):
+                return type(x)(to_numpy(v) for v in x)
+            return x
+
+        params_dict = {
+            "network_params": to_numpy(params.network_params),
+            "state_mean": to_numpy(params.state_mean),
+            "state_std": to_numpy(params.state_std),
+            "action_mean": to_numpy(params.action_mean),
+            "action_std": to_numpy(params.action_std),
+            "output_mean": to_numpy(params.output_mean),
+            "output_std": to_numpy(params.output_std),
+        }
+
+        with open(path, "wb") as f:
+            pickle.dump(params_dict, f)
+
+    @staticmethod
+    def load_model(path: str | Path) -> DynamicsModelParams:
+        """Load model parameters from disk.
+
+        Args:
+            path: Path to the saved model parameters file.
+
+        Returns:
+            Loaded DynamicsModelParams.
+
+        Raises:
+            FileNotFoundError: If the file doesn't exist.
+        """
+        path = Path(path)
+        if not path.exists():
+            raise FileNotFoundError(f"Model file not found: {path}")
+
+        with open(path, "rb") as f:
+            params_dict = pickle.load(f)
+
+        # Convert numpy arrays back to JAX arrays
+        def to_jax(x):
+            """Recursively convert numpy arrays to JAX arrays."""
+            if isinstance(x, np.ndarray):
+                return jnp.array(x)
+            elif isinstance(x, dict):
+                return {k: to_jax(v) for k, v in x.items()}
+            elif isinstance(x, (list, tuple)):
+                return type(x)(to_jax(v) for v in x)
+            return x
+
+        return DynamicsModelParams(
+            network_params=to_jax(params_dict["network_params"]),
+            state_mean=jnp.array(params_dict["state_mean"]),
+            state_std=jnp.array(params_dict["state_std"]),
+            action_mean=jnp.array(params_dict["action_mean"]),
+            action_std=jnp.array(params_dict["action_std"]),
+            output_mean=jnp.array(params_dict["output_mean"]),
+            output_std=jnp.array(params_dict["output_std"]),
+        )
 
