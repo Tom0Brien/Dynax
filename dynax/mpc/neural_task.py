@@ -6,7 +6,7 @@ from typing import Optional
 import jax
 from mujoco import mjx
 
-from dynax.base import BaseDynamicsModel, DynamicsModelParams
+from dynax.base import BaseNeuralModel, NeuralModelParams
 from dynax.utils.data import extract_state_features
 from hydrax.task_base import Task
 
@@ -24,8 +24,8 @@ class NeuralTask(Task):
     def __init__(
         self,
         base_task: Task,
-        dynamics_model: BaseDynamicsModel,
-        model_params: Optional[DynamicsModelParams] = None,
+        dynamics_model: BaseNeuralModel,
+        model_params: Optional[NeuralModelParams] = None,
         model_path: Optional[str | Path] = None,
     ) -> None:
         """Initialize the neural task wrapper.
@@ -161,17 +161,17 @@ class NeuralTask(Task):
         self.dynamics_model.save_model(self.model_params, path)
 
     @staticmethod
-    def load_model(path: str | Path) -> DynamicsModelParams:
+    def load_model(path: str | Path) -> NeuralModelParams:
         """Load model parameters from disk.
 
         Args:
             path: Path to the saved model parameters file.
 
         Returns:
-            Loaded DynamicsModelParams.
+            Loaded NeuralModelParams.
 
         Raises:
             FileNotFoundError: If the file doesn't exist.
         """
-        return BaseDynamicsModel.load_model(path)
+        return BaseNeuralModel.load_model(path)
 

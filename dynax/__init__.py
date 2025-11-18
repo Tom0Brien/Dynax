@@ -15,7 +15,7 @@ os.environ["XLA_FLAGS"] = "--xla_gpu_triton_gemm_any=true "
 jax.config.update("jax_compilation_cache_dir", "/tmp/jax_cache")
 
 # Import core functionality
-from dynax.base import BaseDynamicsModel, DynamicsModelParams
+from dynax.base import BaseNeuralModel, NeuralModelParams
 from dynax.envs.envs import Env, list_available_models
 from dynax.evaluation import (
     create_rollout_fn,
@@ -36,8 +36,8 @@ from dynax.training import (
 __version__ = "0.1.0"
 __all__ = [
     "ROOT",
-    "BaseDynamicsModel",
-    "DynamicsModelParams",
+    "BaseNeuralModel",
+    "NeuralModelParams",
     "TrainingConfig",
     "TrainingState",
     "train_dynamics_model",

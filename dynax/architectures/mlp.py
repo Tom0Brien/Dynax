@@ -6,10 +6,10 @@ import jax
 import jax.numpy as jnp
 from flax import linen as nn
 
-from dynax.base import BaseDynamicsModel
+from dynax.base import BaseNeuralModel
 
 
-class MLPDynamicsModel(BaseDynamicsModel):
+class MLPNeuralModel(BaseNeuralModel):
     """Simple feedforward MLP predicting state deltas.
 
     Architecture from "Neural Network Dynamics for Model-Based Deep RL":

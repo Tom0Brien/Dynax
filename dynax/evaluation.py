@@ -12,7 +12,7 @@ from mujoco import mjx
 
 matplotlib.use("Agg")  # Non-interactive backend
 
-from dynax.base import BaseDynamicsModel, DynamicsModelParams
+from dynax.base import BaseNeuralModel, NeuralModelParams
 from dynax.envs import Env
 from dynax.utils.data import DynamicsDataset, extract_state_features
 
@@ -159,8 +159,8 @@ def render_trajectory_video(
 
 
 def evaluate_single_step(
-    model: BaseDynamicsModel,
-    params: DynamicsModelParams,
+    model: BaseNeuralModel,
+    params: NeuralModelParams,
     states: jax.Array,
     actions: jax.Array,
     next_states_true: jax.Array,
@@ -211,8 +211,8 @@ def evaluate_single_step(
 
 
 def evaluate_single_step_dataset(
-    model: BaseDynamicsModel,
-    params: DynamicsModelParams,
+    model: BaseNeuralModel,
+    params: NeuralModelParams,
     dataset: DynamicsDataset,
     num_samples: Optional[int] = None,
     rng: Optional[jax.Array] = None,
@@ -247,8 +247,8 @@ def evaluate_single_step_dataset(
 
 
 def create_rollout_fn(
-    model: BaseDynamicsModel,
-    params: DynamicsModelParams,
+    model: BaseNeuralModel,
+    params: NeuralModelParams,
 ) -> Callable[[jax.Array, jax.Array], jax.Array]:
     """Create a JIT-compiled rollout function with history buffer support.
 

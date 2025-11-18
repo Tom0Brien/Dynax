@@ -5,7 +5,7 @@ from hydrax.algs import PredictiveSampling
 from hydrax.tasks.double_cart_pole import DoubleCartPole as HydraxDoubleCartPoleTask
 
 from dynax import TrainingConfig, train_dynamics_model
-from dynax.architectures import TransformerDynamicsModel, ResNetDynamicsModel
+from dynax.architectures import TransformerNeuralModel, ResNetNeuralModel
 from dynax.envs import DoubleCartPoleEnv
 from dynax.utils import HydraxController, collect_and_prepare_data
 
@@ -36,7 +36,7 @@ train_dataset, val_dataset = collect_and_prepare_data(
 )
 
 # Train model
-dynamics_model = ResNetDynamicsModel(
+dynamics_model = ResNetNeuralModel(
     env=env,
 )
 

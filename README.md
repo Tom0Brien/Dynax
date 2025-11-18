@@ -16,7 +16,7 @@ uv pip install -e .
 ```python
 import jax
 from dynax import TrainingConfig, train_dynamics_model
-from dynax.architectures import MLPDynamicsModel
+from dynax.architectures import MLPNeuralModel
 from dynax.envs import PendulumEnv
 from dynax.utils import collect_and_prepare_data
 
@@ -33,7 +33,7 @@ train_dataset, val_dataset = collect_and_prepare_data(
 )
 
 # Create model
-model = MLPDynamicsModel(env=env, hidden_dims=(500, 500))
+model = MLPNeuralModel(env=env, hidden_dims=(500, 500))
 
 # Train
 trained_params = train_dynamics_model(
@@ -67,17 +67,17 @@ All inputs/outputs are automatically normalized during training.
 
 ## Architectures
 
-- **MLPDynamicsModel**: Simple feedforward MLP with configurable hidden layers
-- **ResNetDynamicsModel**: Residual network architecture with skip connections
-- **TransformerDynamicsModel**: GPT-2 style transformer with causal self-attention
+- **MLPNeuralModel**: Simple feedforward MLP with configurable hidden layers
+- **ResNetNeuralModel**: Residual network architecture with skip connections
+- **TransformerNeuralModel**: GPT-2 style transformer with causal self-attention
 
 ## Custom Models
 
 ```python
-from dynax.base import BaseDynamicsModel
+from dynax.base import BaseNeuralModel
 from flax import linen as nn
 
-class MyModel(BaseDynamicsModel):
+class MyModel(BaseNeuralModel):
     @nn.compact
     def __call__(self, states, actions, training=False):
         x = jnp.concatenate([states.flatten(), actions.flatten()])

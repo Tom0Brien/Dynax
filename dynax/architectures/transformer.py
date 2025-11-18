@@ -4,7 +4,7 @@ import jax
 import jax.numpy as jnp
 from flax import linen as nn
 
-from dynax.base import BaseDynamicsModel
+from dynax.base import BaseNeuralModel
 
 
 class LayerNorm(nn.Module):
@@ -219,7 +219,7 @@ class TransformerBlock(nn.Module):
         return x
 
 
-class TransformerDynamicsModel(BaseDynamicsModel):
+class TransformerNeuralModel(BaseNeuralModel):
     """GPT2-style transformer for dynamics modeling.
 
     Architecture (following NeRD/Neural Robot Dynamics):

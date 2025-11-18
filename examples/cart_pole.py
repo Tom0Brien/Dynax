@@ -5,7 +5,7 @@ from hydrax.algs import PredictiveSampling
 from hydrax.tasks.cart_pole import CartPole as HydraxCartPoleTask
 
 from dynax import TrainingConfig, train_dynamics_model
-from dynax.architectures import ResNetDynamicsModel, TransformerDynamicsModel
+from dynax.architectures import ResNetNeuralModel, TransformerNeuralModel
 from dynax.envs import CartPoleEnv
 from dynax.utils import HydraxController, collect_and_prepare_data
 
@@ -36,7 +36,7 @@ train_dataset, val_dataset = collect_and_prepare_data(
 )
 
 # Train model
-dynamics_model = ResNetDynamicsModel(
+dynamics_model = ResNetNeuralModel(
     env=env,
 )
 

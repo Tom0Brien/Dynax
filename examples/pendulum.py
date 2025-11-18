@@ -8,8 +8,8 @@ import mujoco
 import numpy as np
 
 from dynax import TrainingConfig, train_dynamics_model
-from dynax.architectures import ResNetDynamicsModel
-from dynax.base import BaseDynamicsModel
+from dynax.architectures import ResNetNeuralModel
+from dynax.base import BaseNeuralModel
 from dynax.envs import PendulumEnv
 from dynax.mpc import NeuralTask
 from dynax.utils import HydraxController, collect_and_prepare_data
@@ -57,7 +57,7 @@ def train_model(model_path: str = "models/pendulum_neural.pkl"):
 
     # Create model with history_length=1 for NeuralTask compatibility
     print("\nCreating model...")
-    dynamics_model = ResNetDynamicsModel(
+    dynamics_model = ResNetNeuralModel(
         env=env,
         history_length=1,
     )
@@ -108,13 +108,13 @@ def test_model(model_path: str = "models/pendulum_neural.pkl"):
 
     # Create environment and model architecture (must match training)
     env = PendulumEnv()
-    dynamics_model = ResNetDynamicsModel(
+    dynamics_model = ResNetNeuralModel(
         env=env,
         history_length=1,
     )
 
     # Load model parameters
-    model_params = BaseDynamicsModel.load_model(model_path)
+    model_params = BaseNeuralModel.load_model(model_path)
 
     # Create base task and neural task
     print("Creating neural task...")

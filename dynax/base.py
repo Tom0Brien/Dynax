@@ -14,8 +14,8 @@ from dynax.envs import Env
 
 
 @dataclass
-class DynamicsModelParams:
-    """Parameters for a learned dynamics model.
+class NeuralModelParams:
+    """Parameters for a learned neural model.
 
     Attributes:
         network_params: Neural network parameters.
@@ -36,8 +36,8 @@ class DynamicsModelParams:
     output_std: jax.Array
 
 
-class BaseDynamicsModel(nn.Module):
-    """Abstract base class for neural dynamics models.
+class BaseNeuralModel(nn.Module):
+    """Abstract base class for neural models.
 
     Attributes:
         env: Environment providing model dimensions and timestep.
@@ -102,7 +102,7 @@ class BaseDynamicsModel(nn.Module):
 
     def step(
         self,
-        params: DynamicsModelParams,
+        params: NeuralModelParams,
         states: jax.Array,
         actions: jax.Array,
     ) -> jax.Array:
@@ -147,7 +147,7 @@ class BaseDynamicsModel(nn.Module):
         # Use the most recent state from history
         return states[-1] + output
 
-    def save_model(self, params: DynamicsModelParams, path: str | Path) -> None:
+    def save_model(self, params: NeuralModelParams, path: str | Path) -> None:
         """Save the model parameters to disk.
 
         Args:
@@ -187,14 +187,14 @@ class BaseDynamicsModel(nn.Module):
             pickle.dump(params_dict, f)
 
     @staticmethod
-    def load_model(path: str | Path) -> DynamicsModelParams:
+    def load_model(path: str | Path) -> NeuralModelParams:
         """Load model parameters from disk.
 
         Args:
             path: Path to the saved model parameters file.
 
         Returns:
-            Loaded DynamicsModelParams.
+            Loaded NeuralModelParams.
 
         Raises:
             FileNotFoundError: If the file doesn't exist.
@@ -217,7 +217,7 @@ class BaseDynamicsModel(nn.Module):
                 return type(x)(to_jax(v) for v in x)
             return x
 
-        return DynamicsModelParams(
+        return NeuralModelParams(
             network_params=to_jax(params_dict["network_params"]),
             state_mean=jnp.array(params_dict["state_mean"]),
             state_std=jnp.array(params_dict["state_std"]),

@@ -8,7 +8,7 @@ import numpy as np
 from mujoco import mjx
 
 from dynax import TrainingConfig, train_dynamics_model
-from dynax.architectures import ResidualDynamicsModel
+from dynax.architectures import ResidualNeuralModel
 from dynax.envs import PendulumEnv
 from dynax.evaluation import create_rollout_fn, create_true_rollout_fn
 from dynax.utils import collect_and_prepare_data
@@ -113,7 +113,7 @@ print(
 # to correct for the difference between base model and true dynamics
 # (which has varied parameters)
 base_env = PendulumEnv()
-dynamics_model = ResidualDynamicsModel(
+dynamics_model = ResidualNeuralModel(
     env=base_env,
     hidden_dims=(500, 500),
     activation="relu",

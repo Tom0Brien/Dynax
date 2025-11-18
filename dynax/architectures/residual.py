@@ -7,11 +7,11 @@ import jax.numpy as jnp
 from flax import linen as nn
 from mujoco import mjx
 
-from dynax.base import BaseDynamicsModel
+from dynax.base import BaseNeuralModel
 from dynax.utils.data import extract_state_features
 
 
-class ResidualDynamicsModel(BaseDynamicsModel):
+class ResidualNeuralModel(BaseNeuralModel):
     """Residual dynamics model using physics model + learned correction.
 
     This model uses the underlying physics model (MuJoCo) to predict the next

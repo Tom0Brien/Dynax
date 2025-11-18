@@ -11,7 +11,7 @@ import optax
 from flax.struct import dataclass
 from tensorboardX import SummaryWriter
 
-from dynax.base import BaseDynamicsModel, DynamicsModelParams
+from dynax.base import BaseNeuralModel, NeuralModelParams
 from dynax.utils.data import DynamicsDataset
 from dynax.utils.normalization import (
     compute_action_normalization_stats,
@@ -68,7 +68,7 @@ class TrainingState:
 
 
 def create_loss_fn(
-    model: BaseDynamicsModel,
+    model: BaseNeuralModel,
     state_mean: jax.Array,
     state_std: jax.Array,
     action_mean: jax.Array,
@@ -352,8 +352,8 @@ def create_epoch_train_fn(
 
 
 def _print_evaluation_summary(
-    model: BaseDynamicsModel,
-    params: DynamicsModelParams,
+    model: BaseNeuralModel,
+    params: NeuralModelParams,
     val_dataset: DynamicsDataset,
     env,
     eval_num_samples: int,
@@ -519,7 +519,7 @@ def _print_evaluation_summary(
 
 
 def train_dynamics_model(
-    model: BaseDynamicsModel,
+    model: BaseNeuralModel,
     train_dataset: DynamicsDataset,
     val_dataset: DynamicsDataset,
     config: TrainingConfig,
@@ -529,7 +529,7 @@ def train_dynamics_model(
     eval_num_samples: int = 1000,
     eval_rollout_length: int = 100,
     eval_num_rollouts: int = 10,  # Reduced default for faster evaluation
-) -> DynamicsModelParams:
+) -> NeuralModelParams:
     """Train a dynamics model on collected data.
 
     Args:
@@ -754,7 +754,7 @@ def train_dynamics_model(
         train_state = train_state.replace(epoch=epoch + 1)
 
     # Create final model parameters
-    trained_params = DynamicsModelParams(
+    trained_params = NeuralModelParams(
         network_params=train_state.params,
         state_mean=state_mean,
         state_std=state_std,

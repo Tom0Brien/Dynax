@@ -4,7 +4,7 @@ import jax
 import jax.numpy as jnp
 from flax import linen as nn
 
-from dynax.base import BaseDynamicsModel
+from dynax.base import BaseNeuralModel
 
 
 class ResidualBlock(nn.Module):
@@ -52,7 +52,7 @@ class ResidualBlock(nn.Module):
         return x
 
 
-class ResNetDynamicsModel(BaseDynamicsModel):
+class ResNetNeuralModel(BaseNeuralModel):
     """ResNet architecture predicting state deltas with residual connections.
 
     Architecture:
