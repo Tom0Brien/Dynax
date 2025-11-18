@@ -11,7 +11,7 @@ import optax
 from flax.struct import dataclass
 from tensorboardX import SummaryWriter
 
-from dynax.base import BaseNeuralModel, NeuralModelParams
+from dynax.base_neural_model import BaseNeuralModel, NeuralModelParams
 from dynax.utils.data import DynamicsDataset
 from dynax.utils.normalization import (
     compute_action_normalization_stats,

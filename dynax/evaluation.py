@@ -12,7 +12,7 @@ from mujoco import mjx
 
 matplotlib.use("Agg")  # Non-interactive backend
 
-from dynax.base import BaseNeuralModel, NeuralModelParams
+from dynax.base_neural_model import BaseNeuralModel, NeuralModelParams
 from dynax.envs import Env
 from dynax.utils.data import DynamicsDataset, extract_state_features
 

@@ -6,7 +6,7 @@ import jax
 import jax.numpy as jnp
 from flax import linen as nn
 
-from dynax.base import BaseNeuralModel
+from dynax.base_neural_model import BaseNeuralModel
 
 
 class MLPNeuralModel(BaseNeuralModel):

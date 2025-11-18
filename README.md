@@ -74,7 +74,7 @@ All inputs/outputs are automatically normalized during training.
 ## Custom Models
 
 ```python
-from dynax.base import BaseNeuralModel
+from dynax.base_neural_model import BaseNeuralModel
 from flax import linen as nn
 
 class MyModel(BaseNeuralModel):

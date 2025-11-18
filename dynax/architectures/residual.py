@@ -7,7 +7,7 @@ import jax.numpy as jnp
 from flax import linen as nn
 from mujoco import mjx
 
-from dynax.base import BaseNeuralModel
+from dynax.base_neural_model import BaseNeuralModel
 from dynax.utils.data import extract_state_features
 
 

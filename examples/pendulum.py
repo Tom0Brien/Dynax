@@ -9,7 +9,7 @@ import numpy as np
 
 from dynax import TrainingConfig, train_dynamics_model
 from dynax.architectures import ResNetNeuralModel
-from dynax.base import BaseNeuralModel
+from dynax.base_neural_model import BaseNeuralModel
 from dynax.envs import PendulumEnv
 from dynax.mpc import NeuralTask
 from dynax.utils import HydraxController, collect_and_prepare_data

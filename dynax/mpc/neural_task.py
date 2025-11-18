@@ -6,7 +6,7 @@ from typing import Optional
 import jax
 from mujoco import mjx
 
-from dynax.base import BaseNeuralModel, NeuralModelParams
+from dynax.base_neural_model import BaseNeuralModel, NeuralModelParams
 from dynax.utils.data import extract_state_features
 from hydrax.task_base import Task
 
