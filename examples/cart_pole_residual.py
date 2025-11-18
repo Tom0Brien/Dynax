@@ -730,8 +730,13 @@ def eval_model(model_path: str = "models/cart_pole_residual.pkl"):
     print(f"\nImprovement: {improvement:.2f}% cost reduction")
     print("=" * 80)
 
-    # Create comparison plot
+    # Create comparison plot with light blue theme
     fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+
+    # Light blue color scheme
+    light_blue = "#87CEEB"  # Sky blue
+    medium_blue = "#4682B4"  # Steel blue
+    dark_blue = "#1E90FF"  # Dodger blue
 
     # Plot 1: Cost distribution
     axes[0].hist(
@@ -739,17 +744,19 @@ def eval_model(model_path: str = "models/cart_pole_residual.pkl"):
         bins=15,
         alpha=0.7,
         label="Base Physics MPC",
-        color="red",
+        color=light_blue,
+        edgecolor=medium_blue,
     )
     axes[0].hist(
         learned_costs_np,
         bins=15,
         alpha=0.7,
         label="Learned Neural MPC",
-        color="blue",
+        color=dark_blue,
+        edgecolor=medium_blue,
     )
-    axes[0].axvline(base_mean, color="red", linestyle="--", linewidth=2)
-    axes[0].axvline(learned_mean, color="blue", linestyle="--", linewidth=2)
+    axes[0].axvline(base_mean, color=medium_blue, linestyle="--", linewidth=2)
+    axes[0].axvline(learned_mean, color=dark_blue, linestyle="--", linewidth=2)
     axes[0].set_xlabel("Total Episode Cost")
     axes[0].set_ylabel("Frequency")
     axes[0].set_title("Cost Distribution")
@@ -760,9 +767,16 @@ def eval_model(model_path: str = "models/cart_pole_residual.pkl"):
     categories = ["Base Physics\nMPC", "Learned Neural\nMPC"]
     means = [base_mean, learned_mean]
     stds = [base_std, learned_std]
-    colors = ["red", "blue"]
+    colors = [light_blue, dark_blue]
 
-    bars = axes[1].bar(categories, means, yerr=stds, capsize=10, color=colors)
+    bars = axes[1].bar(
+        categories,
+        means,
+        yerr=stds,
+        capsize=10,
+        color=colors,
+        edgecolor=medium_blue,
+    )
     axes[1].set_ylabel("Mean Episode Cost")
     axes[1].set_title("MPC Performance Comparison")
     axes[1].grid(True, alpha=0.3, axis="y")
