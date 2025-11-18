@@ -400,84 +400,6 @@ def plot_mpc_comparison(
     plt.close()
 
 
-def _evaluate_mpc_controllers_core(
-    base_controller: SamplingBasedController,
-    learned_controller: SamplingBasedController,
-    initial_states: mjx.Data,
-    true_step_fn: Callable[[mjx.Data, jax.Array], mjx.Data],
-    sync_to_base_fn: Callable[[mjx.Data], mjx.Data],
-    sync_to_neural_fn: Callable[[mjx.Data], mjx.Data],
-    cost_fn: Callable[[mjx.Data, jax.Array], jax.Array],
-    terminal_cost_fn: Callable[[mjx.Data], jax.Array],
-    episode_length: int,
-    dt: float,
-    rng: jax.Array,
-    replan_freq_hz: float = 10.0,
-) -> Tuple[jax.Array, jax.Array]:
-    """Evaluate base and learned MPC controllers in parallel (low-level).
-
-    Args:
-        base_controller: Base physics MPC controller.
-        learned_controller: Learned neural MPC controller.
-        initial_states: Initial states for episodes (pytree from vmap).
-        true_step_fn: Function to step true dynamics.
-        sync_to_base_fn: Function to sync state to base model.
-        sync_to_neural_fn: Function to sync state to neural model.
-        cost_fn: Running cost function.
-        terminal_cost_fn: Terminal cost function.
-        episode_length: Length of each episode.
-        dt: Time step duration.
-        rng: Random number generator key.
-        replan_freq_hz: Replanning frequency in Hz.
-
-    Returns:
-        Tuple of (base_costs, learned_costs) arrays.
-    """
-    # Get number of episodes from pytree structure
-    num_episodes = initial_states.qpos.shape[0]
-
-    # Create episode runner functions
-    def run_base_episode(state, _rng):
-        return run_mpc_episode(
-            state,
-            base_controller,
-            true_step_fn,
-            sync_to_base_fn,
-            cost_fn,
-            terminal_cost_fn,
-            episode_length,
-            dt,
-            replan_freq_hz=replan_freq_hz,
-            return_trajectory=False,
-        )[0]  # Extract cost only
-
-    def run_learned_episode(state, _rng):
-        return run_mpc_episode(
-            state,
-            learned_controller,
-            true_step_fn,
-            sync_to_neural_fn,
-            cost_fn,
-            terminal_cost_fn,
-            episode_length,
-            dt,
-            replan_freq_hz=replan_freq_hz,
-            return_trajectory=False,
-        )[0]  # Extract cost only
-
-    # Generate RNG keys for episodes
-    rng, base_rng = jax.random.split(rng)
-    rng, learned_rng = jax.random.split(rng)
-    base_rngs = jax.random.split(base_rng, num_episodes)
-    learned_rngs = jax.random.split(learned_rng, num_episodes)
-
-    # Run episodes in parallel
-    base_costs = jax.vmap(run_base_episode)(initial_states, base_rngs)
-    learned_costs = jax.vmap(run_learned_episode)(initial_states, learned_rngs)
-
-    return base_costs, learned_costs
-
-
 def evaluate_mpc_controllers(
     base_controller: SamplingBasedController,
     learned_controller: SamplingBasedController,
@@ -524,20 +446,46 @@ def evaluate_mpc_controllers(
     ) = setup_mpc_evaluation(base_task, neural_task, true_env, base_env)
 
     # Evaluate controllers
-    base_costs, learned_costs = _evaluate_mpc_controllers_core(
-        base_controller,
-        learned_controller,
-        initial_states,
-        true_step_fn,
-        sync_to_base_fn,
-        sync_to_neural_fn,
-        cost_fn,
-        terminal_cost_fn,
-        episode_length,
-        dt,
-        rng,
-        replan_freq_hz=replan_freq_hz,
-    )
+    num_episodes = initial_states.qpos.shape[0]
+
+    # Create episode runner functions
+    def run_base_episode(state, _rng):
+        return run_mpc_episode(
+            state,
+            base_controller,
+            true_step_fn,
+            sync_to_base_fn,
+            cost_fn,
+            terminal_cost_fn,
+            episode_length,
+            dt,
+            replan_freq_hz=replan_freq_hz,
+            return_trajectory=False,
+        )[0]  # Extract cost only
+
+    def run_learned_episode(state, _rng):
+        return run_mpc_episode(
+            state,
+            learned_controller,
+            true_step_fn,
+            sync_to_neural_fn,
+            cost_fn,
+            terminal_cost_fn,
+            episode_length,
+            dt,
+            replan_freq_hz=replan_freq_hz,
+            return_trajectory=False,
+        )[0]  # Extract cost only
+
+    # Generate RNG keys for episodes
+    rng, base_rng = jax.random.split(rng)
+    rng, learned_rng = jax.random.split(rng)
+    base_rngs = jax.random.split(base_rng, num_episodes)
+    learned_rngs = jax.random.split(learned_rng, num_episodes)
+
+    # Run episodes in parallel
+    base_costs = jax.vmap(run_base_episode)(initial_states, base_rngs)
+    learned_costs = jax.vmap(run_learned_episode)(initial_states, learned_rngs)
 
     # Compute statistics
     base_stats = compute_mpc_statistics(np.array(base_costs))
