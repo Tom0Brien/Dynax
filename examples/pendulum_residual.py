@@ -15,7 +15,11 @@ from dynax.architectures import ResidualNeuralModel
 from dynax.envs import PendulumEnv
 from dynax.evaluation import create_rollout_fn, create_true_rollout_fn
 from dynax.mpc import NeuralTask
-from dynax.utils import collect_and_prepare_data
+from dynax.utils import (
+    collect_and_prepare_data,
+    evaluate_mpc_controllers,
+    render_mpc_trajectories,
+)
 from dynax.utils.data import extract_state_features
 from hydrax.algs import PredictiveSampling
 from hydrax.tasks.pendulum import Pendulum as HydraxPendulumTask
@@ -24,7 +28,7 @@ from hydrax.tasks.pendulum import Pendulum as HydraxPendulumTask
 class PendulumEnvVaried(PendulumEnv):
     """Pendulum environment with hardcoded varied mass and friction."""
 
-    mass: float = 1.5
+    mass: float = 1.25
     friction: float = 0.1
 
     def _load_model(self, model_name: str, use_scene: bool) -> mujoco.MjModel:
@@ -81,7 +85,7 @@ def train_model(model_path: str = "models/pendulum_residual.pkl"):
         dataset_path="data/pendulum_varied_dataset.pkl",
         controller=None,  # Use random actions only
         num_controlled_rollouts=0,
-        force_recollect=False,
+        force_recollect=True,
     )
 
     print(
@@ -413,7 +417,7 @@ def eval_model(model_path: str = "models/pendulum_residual.pkl"):
 
     # Evaluation parameters
     num_episodes = 20
-    episode_length = 100  # steps
+    episode_length = 250  # steps
     rng = jax.random.PRNGKey(42)
 
     print(f"\nRunning {num_episodes} episodes in parallel...")
@@ -432,255 +436,41 @@ def eval_model(model_path: str = "models/pendulum_residual.pkl"):
 
     initial_states = jax.vmap(reset_episode)(reset_rngs)
 
-    # JIT-compiled step function for true dynamics
-    @jax.jit
-    def true_step(data, action):
-        """Step true (varied) dynamics."""
-        data = data.replace(ctrl=action)
-        return mjx.step(varied_env.model, data)
-
-    # Functions to sync state from true model to controller-specific models
-    @jax.jit
-    def sync_to_base_model(true_state):
-        """Sync state from varied model to base model."""
-        ctrl_data = mjx.make_data(base_env.model)
-        # Copy qpos, qvel, time, and ctrl from true state
-        ctrl_data = ctrl_data.replace(
-            qpos=true_state.qpos,
-            qvel=true_state.qvel,
-            time=true_state.time,
-            ctrl=true_state.ctrl,
-        )
-        # Forward kinematics to update dependent quantities
-        return mjx.forward(base_env.model, ctrl_data)
-
-    @jax.jit
-    def sync_to_neural_model(true_state):
-        """Sync state from varied model to neural task model."""
-        # Neural task uses the same model as base task
-        ctrl_data = mjx.make_data(neural_task.model)
-        ctrl_data = ctrl_data.replace(
-            qpos=true_state.qpos,
-            qvel=true_state.qvel,
-            time=true_state.time,
-            ctrl=true_state.ctrl,
-        )
-        return mjx.forward(neural_task.model, ctrl_data)
-
-    # JIT-compiled cost function (uses base task, works with any model)
-    @jax.jit
-    def compute_cost(state, action):
-        """Compute running cost."""
-        return base_task.running_cost(state, action)
-
-    @jax.jit
-    def compute_terminal_cost(state):
-        """Compute terminal cost."""
-        return base_task.terminal_cost(state)
-
-    # Create JIT-compiled optimize functions for each controller
-    base_jit_optimize = jax.jit(base_ctrl.optimize)
-    learned_jit_optimize = jax.jit(learned_ctrl.optimize)
-
-    # Create JIT-compiled interpolation functions
-    base_jit_interp = jax.jit(base_ctrl.interp_func)
-    learned_jit_interp = jax.jit(learned_ctrl.interp_func)
-
-    # Run single episode with a controller
-    def run_episode_base(initial_state, episode_rng):
-        """Run a single MPC episode with base controller."""
-        return _run_episode(
-            initial_state,
-            base_ctrl,
-            base_jit_optimize,
-            base_jit_interp,
-            sync_to_base_model,
-        )
-
-    def run_episode_learned(initial_state, episode_rng):
-        """Run a single MPC episode with learned controller."""
-        return _run_episode(
-            initial_state,
-            learned_ctrl,
-            learned_jit_optimize,
-            learned_jit_interp,
-            sync_to_neural_model,
-        )
-
-    def _run_episode(
-        initial_state, ctrl, jit_optimize, jit_interp, sync_fn
-    ):
-        """Run a single MPC episode."""
-        true_state = initial_state
-        total_cost = 0.0
-
-        # Initialize controller with synced state
-        ctrl_state = sync_fn(true_state)
-        ctrl_params = ctrl.init_params(seed=0)
-
-        # Replanning frequency (replan every step for simplicity)
-        replan_period = 1.0 / 10.0  # 10 Hz
-        sim_steps_per_replan = max(1, int(replan_period / varied_env.dt))
-
-        def step_fn(carry, step_idx):
-            """Single MPC step."""
-            true_state, ctrl_state, ctrl_params, total_cost = carry
-
-            # Sync controller state from true state
-            ctrl_state = sync_fn(true_state)
-
-            # Replan if needed
-            should_replan = step_idx % sim_steps_per_replan == 0
-
-            def replan(s, p):
-                """Replan."""
-                new_params, _ = jit_optimize(s, p)
-                return new_params
-
-            def no_replan(s, p):
-                """Don't replan."""
-                return p
-
-            # Conditionally replan using synced controller state
-            ctrl_params = jax.lax.cond(
-                should_replan,
-                replan,
-                no_replan,
-                ctrl_state,
-                ctrl_params,
-            )
-
-            # Get action from current policy
-            t_curr = ctrl_state.time
-            tq = jnp.array([t_curr])
-            tk = ctrl_params.tk
-            knots = ctrl_params.mean[None, ...]  # (1, num_knots, nu)
-            actions = jit_interp(tq, tk, knots)
-            action = actions[0, 0]  # (nu,)
-
-            # Clip action to limits
-            action = jnp.clip(action, ctrl.task.u_min, ctrl.task.u_max)
-
-            # Compute cost using synced state (for consistency)
-            cost = compute_cost(ctrl_state, action)
-            total_cost = total_cost + cost
-
-            # Step true dynamics (this is what actually happens)
-            next_true_state = true_step(true_state, action)
-
-            return (next_true_state, ctrl_state, ctrl_params, total_cost), None
-
-        # Run episode
-        (final_true_state, _, _, total_cost), _ = jax.lax.scan(
-            step_fn,
-            (true_state, ctrl_state, ctrl_params, total_cost),
-            jnp.arange(episode_length),
-        )
-
-        # Add terminal cost using synced final state
-        final_ctrl_state = sync_fn(final_true_state)
-        terminal_cost = compute_terminal_cost(final_ctrl_state)
-        total_cost = total_cost + terminal_cost
-
-        return total_cost
-
-    # Run episodes in parallel for both controllers
-    rng, base_rng = jax.random.split(rng)
-    rng, learned_rng = jax.random.split(rng)
-    base_rngs = jax.random.split(base_rng, num_episodes)
-    learned_rngs = jax.random.split(learned_rng, num_episodes)
-
+    # Evaluate controllers and generate report
     print("Running episodes with base physics MPC...")
-    base_costs = jax.vmap(run_episode_base)(initial_states, base_rngs)
-
     print("Running episodes with learned neural MPC...")
-    learned_costs = jax.vmap(run_episode_learned)(
-        initial_states, learned_rngs
+    evaluate_mpc_controllers(
+        base_ctrl,
+        learned_ctrl,
+        initial_states,
+        base_task,
+        neural_task,
+        varied_env,
+        base_env,
+        episode_length,
+        varied_env.dt,
+        rng,
+        plot_path="logs/pendulum_residual/mpc_comparison.png",
+        replan_freq_hz=10.0,
     )
 
-    # Compute statistics
-    base_costs_np = np.array(base_costs)
-    learned_costs_np = np.array(learned_costs)
-
-    base_mean = np.mean(base_costs_np)
-    base_std = np.std(base_costs_np)
-    learned_mean = np.mean(learned_costs_np)
-    learned_std = np.std(learned_costs_np)
-
-    improvement = ((base_mean - learned_mean) / base_mean) * 100
-
-    print("\n" + "=" * 80)
-    print("MPC Performance Comparison")
-    print("=" * 80)
-    print(f"\nEpisodes: {num_episodes}")
-    print(f"Episode length: {episode_length} steps")
-    print("\nBase Physics MPC (wrong model):")
-    print(f"  Mean cost: {base_mean:.4f} ± {base_std:.4f}")
-    print(f"  Min cost:  {np.min(base_costs_np):.4f}")
-    print(f"  Max cost:  {np.max(base_costs_np):.4f}")
-
-    print("\nLearned Neural MPC:")
-    print(f"  Mean cost: {learned_mean:.4f} ± {learned_std:.4f}")
-    print(f"  Min cost:  {np.min(learned_costs_np):.4f}")
-    print(f"  Max cost:  {np.max(learned_costs_np):.4f}")
-
-    print(f"\nImprovement: {improvement:.2f}% cost reduction")
-    print("=" * 80)
-
-    # Create comparison plot
-    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
-
-    # Plot 1: Cost distribution
-    axes[0].hist(
-        base_costs_np,
-        bins=15,
-        alpha=0.7,
-        label="Base Physics MPC",
-        color="red",
+    # Render trajectory videos
+    print("\nRendering videos for visualization...")
+    render_mpc_trajectories(
+        base_ctrl,
+        learned_ctrl,
+        initial_states,
+        base_task,
+        neural_task,
+        varied_env,
+        base_env,
+        episode_length,
+        varied_env.dt,
+        rng,
+        "logs/pendulum_residual",
+        num_videos=1,
+        replan_freq_hz=10.0,
     )
-    axes[0].hist(
-        learned_costs_np,
-        bins=15,
-        alpha=0.7,
-        label="Learned Neural MPC",
-        color="blue",
-    )
-    axes[0].axvline(base_mean, color="red", linestyle="--", linewidth=2)
-    axes[0].axvline(learned_mean, color="blue", linestyle="--", linewidth=2)
-    axes[0].set_xlabel("Total Episode Cost")
-    axes[0].set_ylabel("Frequency")
-    axes[0].set_title("Cost Distribution")
-    axes[0].legend()
-    axes[0].grid(True, alpha=0.3)
-
-    # Plot 2: Comparison bar plot
-    categories = ["Base Physics\nMPC", "Learned Neural\nMPC"]
-    means = [base_mean, learned_mean]
-    stds = [base_std, learned_std]
-    colors = ["red", "blue"]
-
-    bars = axes[1].bar(categories, means, yerr=stds, capsize=10, color=colors)
-    axes[1].set_ylabel("Mean Episode Cost")
-    axes[1].set_title("MPC Performance Comparison")
-    axes[1].grid(True, alpha=0.3, axis="y")
-
-    # Add value labels on bars
-    for bar, mean in zip(bars, means):
-        height = bar.get_height()
-        axes[1].text(
-            bar.get_x() + bar.get_width() / 2.0,
-            height,
-            f"{mean:.2f}",
-            ha="center",
-            va="bottom",
-        )
-
-    plt.tight_layout()
-    plot_path = "logs/pendulum_residual/mpc_comparison.png"
-    Path(plot_path).parent.mkdir(parents=True, exist_ok=True)
-    plt.savefig(plot_path, dpi=150, bbox_inches="tight")
-    print(f"\nPlot saved to: {plot_path}")
-    plt.close()
 
     print("=" * 60)
 
